@@ -14,13 +14,6 @@ Le script copie le dossier `karst_entry/` dans le profil QGIS détecté
 (QGIS 3 et/ou 4). Activez ensuite l'extension dans QGIS :
 *Extensions > Gérer et installer les extensions > Installées > Karst Entry*.
 
-### Dépendances Python
-
-Le plugin n'utilise que la bibliothèque standard Python et PyQGIS :
-**aucune dépendance externe n'est requise**. Les scripts `install_deps.bat`
-(Windows) et `install_deps.sh` (Linux) sont fournis par précaution ; tant que
-`requirements.txt` est vide, ils n'installent rien.
-
 ### Installation manuelle
 
 Copier le dossier `karst_entry/` dans :

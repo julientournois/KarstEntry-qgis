@@ -21,8 +21,6 @@ echo \tests\
 echo build_guide_pdf.py
 echo install_plugin.bat
 echo install_plugin.sh
-echo install_deps.bat
-echo install_deps.sh
 ) > "%EXCLUDE%"
 
 set INSTALLED=0

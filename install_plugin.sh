@@ -27,7 +27,6 @@ EXCLUDES=(
     ".git" ".gitignore" "__pycache__" ".pytest_cache"
     "tests" "docs/build_guide_pdf.py"
     "install_plugin.bat" "install_plugin.sh"
-    "install_deps.bat" "install_deps.sh"
 )
 
 installed=0
