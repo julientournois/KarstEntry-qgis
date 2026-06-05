@@ -1162,13 +1162,13 @@ class KarstDialog(QDialog):
         gb = QVBoxLayout(guide_box)
         lbl_guide = QLabel(
             'Le guide utilisateur illustré est disponible dans le fichier '
-            '<b>GUIDE.pdf</b> du répertoire du plugin.'
+            '<b>KarstEntry_Documentation.pdf</b> du répertoire du plugin.'
         )
         lbl_guide.setWordWrap(True)
         gb.addWidget(lbl_guide)
 
         btn_open = QPushButton("📖 Ouvrir le guide utilisateur")
-        guide_pdf = os.path.join(plugin_dir, "GUIDE.pdf")
+        guide_pdf = os.path.join(plugin_dir, "KarstEntry_Documentation.pdf")
         guide_md = os.path.join(plugin_dir, "INSTALL.md")
         guide_path = guide_pdf if os.path.isfile(guide_pdf) else guide_md
         btn_open.clicked.connect(lambda: self._open_file(guide_path))

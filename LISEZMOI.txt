@@ -18,7 +18,7 @@ Installation manuelle (alternative) : copier le dossier karst_entry/ dans
 
 DOCUMENTATION
 -------------
-Voir GUIDE.pdf (egalement accessible depuis l'onglet Info du plugin).
+Voir KarstEntry_Documentation.pdf (egalement accessible depuis l'onglet Info).
 
 Licence : PolyForm Noncommercial 1.0 (usage non-commercial uniquement).
 Contact : julien.tournois@gmail.com
