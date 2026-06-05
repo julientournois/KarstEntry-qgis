@@ -3,8 +3,8 @@ Karst Entry 1.0
 
 Plugin QGIS de saisie de phenomenes karstiques.
 
-INSTALLATION
-------------
+INSTALLATION DU PLUGIN
+----------------------
 Windows : double-cliquer sur install_plugin.bat
 Linux   : chmod +x install_plugin.sh puis ./install_plugin.sh
 
@@ -15,6 +15,15 @@ Extensions > Gerer et installer les extensions > Installees > Karst Entry.
 Installation manuelle (alternative) : copier le dossier karst_entry/ dans
   Windows : %APPDATA%\QGIS\QGIS4\profiles\default\python\plugins\
   Linux   : ~/.local/share/QGIS/QGIS4/profiles/default/python/plugins/
+
+DEPENDANCES PYTHON
+------------------
+Karst Entry n'utilise que la bibliotheque standard Python et PyQGIS :
+aucune dependance externe n'est requise a ce jour.
+Un script est tout de meme fourni (il detecte le Python de QGIS et lit
+requirements.txt). Si une dependance est ajoutee plus tard, lancez :
+Windows : double-cliquer sur install_deps.bat
+Linux   : chmod +x install_deps.sh puis ./install_deps.sh
 
 DOCUMENTATION
 -------------
