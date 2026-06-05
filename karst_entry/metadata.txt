@@ -1,0 +1,21 @@
+[general]
+name=Karst Entry
+qgisMinimumVersion=3.16
+qgisMaximumVersion=4.99
+description=Plugin de saisie de données pour les phénomènes karstiques de surface
+version=1.0
+author=Julien Tournois
+email=julien.tournois@gmail.com
+about=Permet la saisie rapide de cavités karstiques via formulaire, sur une couche existante ou une nouvelle couche. Génère une référence unique par entrée.
+tracker=
+repository=
+hasProcessingProvider=no
+tags=karst,speleology,cave,geology,field data
+homepage=
+category=Vector
+icon=icon.png
+experimental=False
+deprecated=False
+license=PolyForm Noncommercial 1.0
+licenseUrl=https://polyformproject.org/licenses/noncommercial/1.0.0/
+licenseText=Usage non-commercial uniquement. Toute utilisation commerciale est interdite sans autorisation écrite de l'auteur.

@@ -1,0 +1,20 @@
+{
+  "_comment": "Configuration du plugin Karst Entry. Modifiez ce fichier pour personnaliser les listes déroulantes.",
+
+  "tracage": {
+    "colorants": [
+      "Fluorescéine",
+      "Uranine",
+      "Sulforhodamine B",
+      "Rhodamine WT",
+      "Lycopode",
+      "Tinopal",
+      "Autre"
+    ],
+    "resultats": [
+      "Positif",
+      "Négatif",
+      "Indéterminé"
+    ]
+  }
+}
