@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="karst_entry/brand/karstentry-pastille-ronde-ocre-clair-512.png" alt="Karst Entry" width="130">
+<img src="karst_entry/brand/karstentry-k-integre-accroche-inverse-1024.png" alt="Karst Entry" width="420">
 
 # Karst Entry
 
