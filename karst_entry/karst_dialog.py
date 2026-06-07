@@ -291,6 +291,7 @@ class KarstDialog(QDialog):
         self._tabs.addTab(self._build_edit_tab(), "✏ Modification")
         self._tabs.addTab(self._build_delete_tab(), "🗑 Suppression")
         self._tabs.addTab(self._build_fiche_tab(), "🔍 Fiche")
+        self._tabs.addTab(self._build_views_tab(), "🗂 Vues")
         self._tabs.addTab(self._build_import_tab(), "📥 Import CSV")
         self._tabs.addTab(self._build_info_tab(), "ℹ Info")
         root.addWidget(self._tabs)
@@ -1802,6 +1803,156 @@ class KarstDialog(QDialog):
         self._tr_temps.clear()
         self._tr_operateurs.clear()
         self._tr_comment.setPlainText("")
+
+    # ------------------------------------------------------------- Vues par champ tab --
+
+    def _build_views_tab(self):
+        """Onglet « Vues » : génère des couches filtrées vivantes par valeur d'un
+        champ (commune par défaut). Chaque vue pointe sur le MÊME GeoPackage —
+        pas de copie — et reflète donc le source en direct."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        intro = QLabel(
+            "Crée une couche filtrée par valeur de champ (ex. une couche par "
+            "<b>commune</b>), regroupée dans le panneau des couches. Les vues "
+            "pointent sur la même couche source : elles se mettent à jour "
+            "automatiquement quand tu modifies les données. Aucune copie de fichier."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        layer_row = QHBoxLayout()
+        layer_row.addWidget(QLabel("Couche :"))
+        self._views_layer_combo = QComboBox()
+        self._views_layer_combo.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
+        self._views_layer_combo.currentIndexChanged.connect(self._views_populate_fields)
+        layer_row.addWidget(self._views_layer_combo)
+        btn_refresh = QPushButton("↻")
+        btn_refresh.setFixedWidth(32)
+        btn_refresh.clicked.connect(self._views_populate_layers)
+        layer_row.addWidget(btn_refresh)
+        layout.addLayout(layer_row)
+
+        field_row = QHBoxLayout()
+        field_row.addWidget(QLabel("Champ :"))
+        self._views_field_combo = QComboBox()
+        self._views_field_combo.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
+        field_row.addWidget(self._views_field_combo)
+        layout.addLayout(field_row)
+
+        btn_gen = QPushButton("🗂 Générer les vues par champ")
+        btn_gen.clicked.connect(self._views_generate)
+        layout.addWidget(btn_gen)
+
+        self._views_info = QLabel("")
+        self._views_info.setWordWrap(True)
+        layout.addWidget(self._views_info)
+
+        layout.addStretch()
+        self._views_populate_layers()
+        return tab
+
+    def _views_populate_layers(self):
+        self._views_layer_combo.blockSignals(True)
+        self._views_layer_combo.clear()
+        default_index = -1
+        for layer in QgsProject.instance().mapLayers().values():
+            if not (hasattr(layer, "getFeatures") and hasattr(layer, "fields")):
+                continue
+            try:
+                if not layer.isValid():
+                    continue
+                name, lid = layer.name(), layer.id()
+            except (AttributeError, RuntimeError):
+                continue
+            self._views_layer_combo.addItem(name, lid)
+            if name == self._CAVITES_LAYER_NAME:
+                default_index = self._views_layer_combo.count() - 1
+        if default_index != -1:
+            self._views_layer_combo.setCurrentIndex(default_index)
+        self._views_layer_combo.blockSignals(False)
+        self._views_populate_fields()
+
+    def _views_current_layer(self):
+        lid = self._views_layer_combo.currentData()
+        return QgsProject.instance().mapLayer(lid) if lid else None
+
+    def _views_populate_fields(self):
+        self._views_field_combo.blockSignals(True)
+        self._views_field_combo.clear()
+        layer = self._views_current_layer()
+        if layer is not None:
+            try:
+                names = [f.name() for f in layer.fields()]
+            except (AttributeError, RuntimeError):
+                names = []
+            default_index = -1
+            for i, n in enumerate(names):
+                self._views_field_combo.addItem(n)
+                if n == "commune":
+                    default_index = i
+            if default_index != -1:
+                self._views_field_combo.setCurrentIndex(default_index)
+        self._views_field_combo.blockSignals(False)
+
+    def _views_generate(self):
+        """Génère une couche filtrée vivante par valeur distincte du champ."""
+        layer = self._views_current_layer()
+        if layer is None:
+            QMessageBox.warning(self, "Aucune couche", "Sélectionne une couche.")
+            return
+        field = self._views_field_combo.currentText().strip()
+        if not field:
+            QMessageBox.warning(self, "Aucun champ", "Sélectionne un champ.")
+            return
+
+        # Valeurs distinctes non vides du champ.
+        values = set()
+        try:
+            for feat in layer.getFeatures():
+                v = feat[field]
+                if v is not None and str(v).strip():
+                    values.add(str(v).strip())
+        except (KeyError, AttributeError, RuntimeError):
+            QMessageBox.warning(self, "Champ illisible",
+                                f"Impossible de lire le champ « {field} ».")
+            return
+        values = sorted(values)
+        if not values:
+            QMessageBox.information(self, "Rien à générer",
+                                    f"Aucune valeur dans le champ « {field} ».")
+            return
+        if len(values) > 50:
+            ok = QMessageBox.question(
+                self, "Beaucoup de valeurs",
+                f"Le champ « {field} » a {len(values)} valeurs distinctes : "
+                f"cela créera {len(values)} couches. Continuer ?")
+            if ok != QMessageBox.Yes:
+                return
+
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
+        group_name = f"{layer.name()} — par {field}"
+
+        # Repartir propre : retirer un groupe homonyme existant.
+        existing = root.findGroup(group_name)
+        if existing is not None:
+            root.removeChildNode(existing)
+        group = root.insertGroup(0, group_name)
+
+        created = 0
+        for v in values:
+            sub = layer.clone()
+            sub.setName(f"{layer.name()} - {v}")
+            sub.setSubsetString(f'"{field}" = \'' + v.replace("'", "''") + "'")
+            project.addMapLayer(sub, False)   # False : ne pas ajouter à la racine
+            group.addLayer(sub)
+            created += 1
+
+        self._views_info.setText(
+            f"✓ {created} vue(s) générée(s) dans le groupe « {group_name} ». "
+            f"Elles reflètent la couche source en direct.")
 
     # ---------------------------------------------------------------- Import CSV tab --
 
