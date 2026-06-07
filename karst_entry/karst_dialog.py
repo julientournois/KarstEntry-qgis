@@ -259,6 +259,7 @@ class KarstDialog(QDialog):
         self._map_tool        = None   # PointCaptureTool actif (ou None)
         self._prev_tool       = None   # outil carte précédent, restauré après capture
         self._captured_point  = None   # QgsPointXY du dernier clic carte
+        self._captured_crs    = None   # CRS du canevas au moment de la capture
         # On ne cache QUE l'id (str) de la couche, jamais l'objet QgsVectorLayer :
         # un objet caché peut être détruit côté C++ (suppression de la couche) et
         # tout accès lèverait « wrapped C/C++ object ... deleted ». L'id se re-résout
@@ -669,6 +670,10 @@ class KarstDialog(QDialog):
             "code_dept":   self._f_code_dept.text().strip(),
             "x":         x,
             "y":         y,
+            # CRS dans lequel x/y sont exprimés (= CRS du canevas à la capture).
+            # Sert à reprojeter vers le CRS de la couche à l'écriture.
+            "src_crs":   getattr(self, "_captured_crs", None)
+                         or self.canvas.mapSettings().destinationCrs(),
             "photos":    list(self._photo_paths),
         }
 
@@ -809,12 +814,28 @@ class KarstDialog(QDialog):
         # Dossier de la couche (pour copier les photos à côté → portable).
         layer_dir = self._layer_dir(layer)
 
+        layer_crs = layer.crs()
+
         added = 0
         for entry in self._queue:
             x, y = entry["x"], entry["y"]
             feat = QgsFeature(layer.fields())
             if x is not None:
-                feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+                pt = QgsPointXY(x, y)
+                # Reprojeter du CRS de capture vers le CRS de la couche : sinon
+                # des coordonnées capturées dans un projet d'un CRS différent de
+                # celui de la couche seraient écrites brutes (géométrie fausse).
+                src = entry.get("src_crs")
+                if src is not None and src.isValid() and src != layer_crs:
+                    try:
+                        tr = QgsCoordinateTransform(src, layer_crs,
+                                                    QgsProject.instance())
+                        pt = tr.transform(pt)
+                        # garder les colonnes x/y cohérentes avec la géométrie
+                        x, y = pt.x(), pt.y()
+                    except Exception:
+                        pass
+                feat.setGeometry(QgsGeometry.fromPointXY(pt))
             # photos écrites après coup (dépendent de la référence)
             values = {
                 "name":      entry["name"],
@@ -2453,6 +2474,7 @@ class KarstDialog(QDialog):
     def _on_point_captured(self, point):
         """Reçoit le point capturé, met à jour les champs X/Y et restaure l'outil précédent."""
         self._captured_point = point
+        self._captured_crs = self.canvas.mapSettings().destinationCrs()
         self._lbl_x.setText(f"{point.x():.6f}")
         self._lbl_y.setText(f"{point.y():.6f}")
         self._reset_capture()
