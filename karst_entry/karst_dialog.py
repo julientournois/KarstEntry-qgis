@@ -1206,13 +1206,26 @@ class KarstDialog(QDialog):
         layer_row.addWidget(QLabel("Couche :"))
         self._del_layer_combo = QComboBox()
         self._del_layer_combo.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
-        self._del_layer_combo.currentIndexChanged.connect(self._refresh_delete_table)
+        self._del_layer_combo.currentIndexChanged.connect(self._del_on_layer_changed)
         layer_row.addWidget(self._del_layer_combo)
         btn_refresh = QPushButton("↻")
         btn_refresh.setFixedWidth(32)
         btn_refresh.clicked.connect(self._populate_delete_layer_combo)
         layer_row.addWidget(btn_refresh)
         layout.addLayout(layer_row)
+
+        # Recherche + filtre par type
+        filter_row = QHBoxLayout()
+        self._del_search = QLineEdit()
+        self._del_search.setPlaceholderText("🔎 Rechercher…")
+        self._del_search.setClearButtonEnabled(True)
+        self._del_search.textChanged.connect(self._refresh_delete_table)
+        filter_row.addWidget(self._del_search, 2)
+        self._del_type = QComboBox()
+        self._del_type.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
+        self._del_type.currentIndexChanged.connect(self._refresh_delete_table)
+        filter_row.addWidget(self._del_type, 1)
+        layout.addLayout(filter_row)
 
         # Feature table
         self._del_table = QTableWidget()
@@ -1249,11 +1262,18 @@ class KarstDialog(QDialog):
             except AttributeError:
                 pass  # couche non vecteur (raster, etc.)
         self._del_layer_combo.blockSignals(False)
-        self._refresh_delete_table()
+        self._del_on_layer_changed()
 
     def _del_current_layer(self):
         layer_id = self._del_layer_combo.currentData()
         return QgsProject.instance().mapLayer(layer_id) if layer_id else None
+
+    def _del_on_layer_changed(self):
+        """Couche changée : rebâtir le filtre de type puis le tableau."""
+        combo = getattr(self, "_del_type", None)
+        if combo is not None:
+            self._populate_type_filter(combo, self._del_current_layer())
+        self._refresh_delete_table()
 
     def _refresh_delete_table(self):
         self._del_table.clear()
@@ -1277,7 +1297,25 @@ class KarstDialog(QDialog):
         self._del_table.setColumnCount(len(display_cols))
         self._del_table.setHorizontalHeaderLabels(display_cols)
 
-        features = list(layer.getFeatures())
+        # Recherche (sur les colonnes affichées, insensible casse/accents) +
+        # filtre par type (si la couche a un champ « type »).
+        search = self._fold(self._del_search.text().strip()) \
+            if hasattr(self, "_del_search") else ""
+        type_f = (self._del_type.currentData() or "") \
+            if hasattr(self, "_del_type") else ""
+
+        def _passes(feat):
+            if type_f and "type" in field_names and str(feat["type"] or "") != type_f:
+                return False
+            if search:
+                hay = self._fold(" ".join(
+                    str(feat[c]) for c in display_cols
+                    if c in field_names and feat[c]))
+                if search not in hay:
+                    return False
+            return True
+
+        features = [f for f in layer.getFeatures() if _passes(f)]
         self._del_table.setRowCount(len(features))
         self._del_fid_map = {}  # row → feature id
 
