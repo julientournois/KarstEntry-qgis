@@ -33,6 +33,7 @@ import csv
 import json
 import shutil
 import threading
+import unicodedata
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit,
@@ -553,10 +554,23 @@ class KarstDialog(QDialog):
         return label
 
     @staticmethod
+    def _fold(text):
+        """Normalise pour comparaison : minuscules + suppression des accents.
+
+        « Résurgence » → « resurgence », « Vallée Sèche » → « vallee seche ».
+        Permet une recherche insensible à la casse ET aux accents.
+        """
+        if not text:
+            return ""
+        norm = unicodedata.normalize("NFKD", str(text))
+        return "".join(c for c in norm if not unicodedata.combining(c)).lower()
+
+    @staticmethod
     def _feature_matches(feat, fields, search, type_filter):
         """True si l'entité passe le filtre type ET la recherche texte.
 
-        search : sous-chaîne (minuscule) cherchée dans référence + nom + type.
+        search : sous-chaîne cherchée dans référence + nom + type, insensible
+                 à la casse ET aux accents.
         type_filter : valeur exacte du champ `type` ; vide = tous.
         """
         ftype = str(feat["type"]) if "type" in fields and feat["type"] else ""
@@ -569,7 +583,7 @@ class KarstDialog(QDialog):
                     parts.append(str(feat[f]))
             if ftype:
                 parts.append(ftype)
-            if search not in " ".join(parts).lower():
+            if KarstDialog._fold(search) not in KarstDialog._fold(" ".join(parts)):
                 return False
         return True
 
