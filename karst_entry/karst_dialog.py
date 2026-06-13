@@ -1683,17 +1683,25 @@ class KarstDialog(QDialog):
         src_layer_row.addWidget(self._tr_src_layer)
         btn_refresh_src = QPushButton("↻")
         btn_refresh_src.setFixedWidth(32)
-        btn_refresh_src.clicked.connect(lambda: self._tr_populate_layers(
-            self._tr_src_layer, self._tr_src_feat))
+        btn_refresh_src.clicked.connect(self._tr_refresh_src)
         src_layer_row.addWidget(btn_refresh_src)
         src_layout.addRow("Couche :", src_layer_row)
+
+        # Recherche + filtre par type
+        self._tr_src_search = QLineEdit()
+        self._tr_src_search.setPlaceholderText("🔎 Rechercher (référence, nom)…")
+        self._tr_src_search.setClearButtonEnabled(True)
+        self._tr_src_search.textChanged.connect(self._tr_features_src)
+        src_layout.addRow("Recherche :", self._tr_src_search)
+        self._tr_src_type = QComboBox()
+        self._tr_src_type.currentIndexChanged.connect(self._tr_features_src)
+        src_layout.addRow("Type :", self._tr_src_type)
 
         self._tr_src_feat = QComboBox()
         self._tr_src_feat.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
         src_layout.addRow("Entité :", self._tr_src_feat)
 
-        self._tr_src_layer.currentIndexChanged.connect(
-            lambda: self._tr_populate_features(self._tr_src_layer, self._tr_src_feat))
+        self._tr_src_layer.currentIndexChanged.connect(self._tr_on_layer_changed_src)
         form.addRow(src_group)
 
         # --- Destination (résurgence) ---
@@ -1706,17 +1714,25 @@ class KarstDialog(QDialog):
         dst_layer_row.addWidget(self._tr_dst_layer)
         btn_refresh_dst = QPushButton("↻")
         btn_refresh_dst.setFixedWidth(32)
-        btn_refresh_dst.clicked.connect(lambda: self._tr_populate_layers(
-            self._tr_dst_layer, self._tr_dst_feat))
+        btn_refresh_dst.clicked.connect(self._tr_refresh_dst)
         dst_layer_row.addWidget(btn_refresh_dst)
         dst_layout.addRow("Couche :", dst_layer_row)
+
+        # Recherche + filtre par type
+        self._tr_dst_search = QLineEdit()
+        self._tr_dst_search.setPlaceholderText("🔎 Rechercher (référence, nom)…")
+        self._tr_dst_search.setClearButtonEnabled(True)
+        self._tr_dst_search.textChanged.connect(self._tr_features_dst)
+        dst_layout.addRow("Recherche :", self._tr_dst_search)
+        self._tr_dst_type = QComboBox()
+        self._tr_dst_type.currentIndexChanged.connect(self._tr_features_dst)
+        dst_layout.addRow("Type :", self._tr_dst_type)
 
         self._tr_dst_feat = QComboBox()
         self._tr_dst_feat.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
         dst_layout.addRow("Entité :", self._tr_dst_feat)
 
-        self._tr_dst_layer.currentIndexChanged.connect(
-            lambda: self._tr_populate_features(self._tr_dst_layer, self._tr_dst_feat))
+        self._tr_dst_layer.currentIndexChanged.connect(self._tr_on_layer_changed_dst)
         form.addRow(dst_group)
 
         # --- Métadonnées ---
@@ -1780,11 +1796,43 @@ class KarstDialog(QDialog):
         layout.addLayout(btn_row)
 
         # Peupler les couches au démarrage
-        self._tr_populate_layers(self._tr_src_layer, self._tr_src_feat)
-        self._tr_populate_layers(self._tr_dst_layer, self._tr_dst_feat)
+        self._tr_refresh_src()
+        self._tr_refresh_dst()
         return tab
 
-    def _tr_populate_layers(self, layer_combo, feat_combo):
+    # Wrappers par côté (source / destination) pour router les signaux.
+    def _tr_refresh_src(self):
+        self._tr_populate_layers(self._tr_src_layer, self._tr_src_feat,
+                                 self._tr_src_search, self._tr_src_type)
+
+    def _tr_refresh_dst(self):
+        self._tr_populate_layers(self._tr_dst_layer, self._tr_dst_feat,
+                                 self._tr_dst_search, self._tr_dst_type)
+
+    def _tr_on_layer_changed_src(self):
+        self._populate_type_filter(
+            self._tr_src_type, self._tr_layer_of(self._tr_src_layer))
+        self._tr_features_src()
+
+    def _tr_on_layer_changed_dst(self):
+        self._populate_type_filter(
+            self._tr_dst_type, self._tr_layer_of(self._tr_dst_layer))
+        self._tr_features_dst()
+
+    def _tr_features_src(self):
+        self._tr_populate_features(self._tr_src_layer, self._tr_src_feat,
+                                   self._tr_src_search, self._tr_src_type)
+
+    def _tr_features_dst(self):
+        self._tr_populate_features(self._tr_dst_layer, self._tr_dst_feat,
+                                   self._tr_dst_search, self._tr_dst_type)
+
+    @staticmethod
+    def _tr_layer_of(layer_combo):
+        lid = layer_combo.currentData()
+        return QgsProject.instance().mapLayer(lid) if lid else None
+
+    def _tr_populate_layers(self, layer_combo, feat_combo, search_w=None, type_w=None):
         """Peuple un sélecteur de couche avec toutes les couches point du projet."""
         layer_combo.blockSignals(True)
         layer_combo.clear()
@@ -1793,10 +1841,12 @@ class KarstDialog(QDialog):
                     and layer.geometryType() == QgsWkbTypes.PointGeometry):
                 layer_combo.addItem(layer.name(), layer.id())
         layer_combo.blockSignals(False)
-        self._tr_populate_features(layer_combo, feat_combo)
+        if type_w is not None:
+            self._populate_type_filter(type_w, self._tr_layer_of(layer_combo))
+        self._tr_populate_features(layer_combo, feat_combo, search_w, type_w)
 
-    def _tr_populate_features(self, layer_combo, feat_combo):
-        """Peuple un sélecteur d'entités depuis la couche sélectionnée."""
+    def _tr_populate_features(self, layer_combo, feat_combo, search_w=None, type_w=None):
+        """Peuple un sélecteur d'entités depuis la couche, filtré recherche/type."""
         feat_combo.blockSignals(True)
         feat_combo.clear()
         layer_id = layer_combo.currentData()
@@ -1804,7 +1854,12 @@ class KarstDialog(QDialog):
             layer = QgsProject.instance().mapLayer(layer_id)
             if layer:
                 fields = [f.name() for f in layer.fields()]
+                search = (search_w.text().strip().lower()
+                          if search_w is not None else "")
+                type_f = (type_w.currentData() or "" if type_w is not None else "")
                 for feat in layer.getFeatures():
+                    if not self._feature_matches(feat, fields, search, type_f):
+                        continue
                     ref  = str(feat["reference"]) if "reference" in fields else ""
                     name = str(feat["name"])       if "name"      in fields else ""
                     label = f"{ref} — {name}" if ref and name else (ref or name or f"ID {feat.id()}")
