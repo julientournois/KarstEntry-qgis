@@ -1620,6 +1620,14 @@ class KarstDialog(QDialog):
             return None
         return QgsProject.instance().mapLayer(layer_id)
 
+    @staticmethod
+    def _is_blank(val):
+        """True si une valeur d'attribut est vide : None, chaîne vide, ou NULL QGIS."""
+        if val is None:
+            return True
+        s = str(val).strip()
+        return s == "" or s.upper() == "NULL"
+
     def _fiche_show(self):
         # Clear previous content
         while self._fiche_layout.count():
@@ -1639,13 +1647,15 @@ class KarstDialog(QDialog):
         fields = [f.name() for f in layer.fields()]
         photo_field = "photos" if "photos" in fields else None
 
-        # Attribute table
+        # Attribute table — on masque les champs vides (None, "", NULL QGIS).
         SKIP = {"photos"}
         for field in layer.fields():
             fname = field.name()
             if fname in SKIP:
                 continue
             val = feat[fname]
+            if self._is_blank(val):
+                continue
             row = QHBoxLayout()
             lbl_key = QLabel(f"<b>{fname}</b>")
             lbl_key.setFixedWidth(120)
