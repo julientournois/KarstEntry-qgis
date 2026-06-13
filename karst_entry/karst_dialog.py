@@ -32,6 +32,7 @@ import os
 import csv
 import json
 import shutil
+import threading
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit,
@@ -40,7 +41,7 @@ from qgis.PyQt.QtWidgets import (
     QListWidgetItem, QAbstractItemView, QTextEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QRadioButton
 )
-from qgis.PyQt.QtCore import Qt, QDate, QSize, QVariant
+from qgis.PyQt.QtCore import Qt, QDate, QSize, QVariant, pyqtSignal
 from qgis.PyQt.QtGui import QPixmap, QIcon
 
 from qgis.core import (
@@ -51,6 +52,7 @@ from qgis.core import (
 from qgis.gui import QgsProjectionSelectionDialog
 
 from .map_tool import PointCaptureTool
+from . import geocode_utils
 
 # ---------------------------------------------------------------------------
 # Compatibilité PyQt5 (QGIS 3) / PyQt6 (QGIS 4) — les enums Qt ont été
@@ -251,6 +253,10 @@ class KarstDialog(QDialog):
         Fenêtre parente Qt.
     """
 
+    # Résultat du géocodage asynchrone : (info_dict_ou_None, génération).
+    # Émis depuis le thread de travail ; Qt route vers le thread UI (queued).
+    _admin_fetched = pyqtSignal(object, int)
+
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface  = iface
@@ -272,6 +278,10 @@ class KarstDialog(QDialog):
         # Cache des communes déjà géocodées : liste de (polygones_wgs84, info).
         # Évite un appel réseau par cavité — un seul par commune distincte.
         self._commune_cache  = []
+        # Compteur de génération du géocodage asynchrone : une réponse réseau
+        # qui arrive après une nouvelle capture est obsolète et ignorée.
+        self._admin_gen      = 0
+        self._admin_fetched.connect(self._on_admin_fetched)
 
         self.setWindowTitle("Saisie du Phénomène Karstique")
         self.setMinimumWidth(580)
@@ -364,6 +374,11 @@ class KarstDialog(QDialog):
         self._f_departement = QLineEdit()
         self._f_departement.setPlaceholderText("auto à la capture")
         form.addRow("Département", self._f_departement)
+        # État du géocodage : recherche en cours / échec (jamais bloquant).
+        self._admin_status = QLabel("")
+        self._admin_status.setStyleSheet("color: #888; font-size: 10px;")
+        self._admin_status.setWordWrap(True)
+        form.addRow("", self._admin_status)
         # Codes conservés dans le schéma mais non affichés (remplis par l'API)
         self._f_code_insee = QLineEdit()
         self._f_code_dept = QLineEdit()
@@ -448,13 +463,26 @@ class KarstDialog(QDialog):
         layer_row.addWidget(QLabel("Couche :"))
         self._edit_layer_combo = QComboBox()
         self._edit_layer_combo.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
-        self._edit_layer_combo.currentIndexChanged.connect(self._edit_populate_features)
+        self._edit_layer_combo.currentIndexChanged.connect(self._edit_on_layer_changed)
         layer_row.addWidget(self._edit_layer_combo)
         btn_refresh = QPushButton("↻")
         btn_refresh.setFixedWidth(32)
         btn_refresh.clicked.connect(self._edit_populate_layers)
         layer_row.addWidget(btn_refresh)
         layout.addLayout(layer_row)
+
+        # Recherche (référence/nom) + filtre par type
+        filter_row = QHBoxLayout()
+        self._edit_search = QLineEdit()
+        self._edit_search.setPlaceholderText("🔎 Rechercher (référence, nom)…")
+        self._edit_search.setClearButtonEnabled(True)
+        self._edit_search.textChanged.connect(self._edit_populate_features)
+        filter_row.addWidget(self._edit_search, 2)
+        self._edit_type_filter = QComboBox()
+        self._edit_type_filter.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
+        self._edit_type_filter.currentIndexChanged.connect(self._edit_populate_features)
+        filter_row.addWidget(self._edit_type_filter, 1)
+        layout.addLayout(filter_row)
 
         feat_row = QHBoxLayout()
         feat_row.addWidget(QLabel("Entité :"))
@@ -501,7 +529,7 @@ class KarstDialog(QDialog):
         if default_index != -1:
             self._edit_layer_combo.setCurrentIndex(default_index)
         self._edit_layer_combo.blockSignals(False)
-        self._edit_populate_features()
+        self._edit_on_layer_changed()
 
     def _current_edit_layer(self):
         layer_id = self._edit_layer_combo.currentData()
@@ -509,22 +537,82 @@ class KarstDialog(QDialog):
             return None
         return QgsProject.instance().mapLayer(layer_id)
 
+    # --- Recherche / filtre par type (partagé Modification & Fiche) ----------
+
+    @staticmethod
+    def _feature_label(feat, fields):
+        """Libellé d'une entité : « référence — nom », repli sur nom puis #id."""
+        if "reference" in fields and feat["reference"]:
+            label = str(feat["reference"])
+            if "name" in fields and feat["name"]:
+                label += f" — {feat['name']}"
+        elif "name" in fields and feat["name"]:
+            label = str(feat["name"])
+        else:
+            label = f"#{feat.id()}"
+        return label
+
+    @staticmethod
+    def _feature_matches(feat, fields, search, type_filter):
+        """True si l'entité passe le filtre type ET la recherche texte.
+
+        search : sous-chaîne (minuscule) cherchée dans référence + nom + type.
+        type_filter : valeur exacte du champ `type` ; vide = tous.
+        """
+        ftype = str(feat["type"]) if "type" in fields and feat["type"] else ""
+        if type_filter and ftype != type_filter:
+            return False
+        if search:
+            parts = []
+            for f in ("reference", "name"):
+                if f in fields and feat[f]:
+                    parts.append(str(feat[f]))
+            if ftype:
+                parts.append(ftype)
+            if search not in " ".join(parts).lower():
+                return False
+        return True
+
+    @staticmethod
+    def _populate_type_filter(combo, layer):
+        """Remplit un combo de filtre avec « Tous les types » + valeurs distinctes."""
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Tous les types", "")
+        if layer is not None:
+            try:
+                fields = [f.name() for f in layer.fields()]
+                if "type" in fields:
+                    types = sorted({str(feat["type"]) for feat in layer.getFeatures()
+                                    if feat["type"]})
+                    for t in types:
+                        combo.addItem(t, t)
+            except (AttributeError, RuntimeError):
+                pass
+        combo.blockSignals(False)
+
+    def _edit_on_layer_changed(self):
+        """Couche changée : rebâtir le filtre de type puis la liste d'entités."""
+        combo = getattr(self, "_edit_type_filter", None)
+        if combo is not None:
+            self._populate_type_filter(combo, self._current_edit_layer())
+        self._edit_populate_features()
+
     def _edit_populate_features(self):
         self._edit_feat_combo.blockSignals(True)
         self._edit_feat_combo.clear()
         layer = self._current_edit_layer()
         if layer is not None:
             fields = [f.name() for f in layer.fields()]
+            search = (self._edit_search.text().strip().lower()
+                      if hasattr(self, "_edit_search") else "")
+            type_f = (self._edit_type_filter.currentData() or ""
+                      if hasattr(self, "_edit_type_filter") else "")
             for feat in layer.getFeatures():
-                if "reference" in fields and feat["reference"]:
-                    label = str(feat["reference"])
-                    if "name" in fields and feat["name"]:
-                        label += f" — {feat['name']}"
-                elif "name" in fields and feat["name"]:
-                    label = str(feat["name"])
-                else:
-                    label = f"#{feat.id()}"
-                self._edit_feat_combo.addItem(label, feat.id())
+                if not self._feature_matches(feat, fields, search, type_f):
+                    continue
+                self._edit_feat_combo.addItem(
+                    self._feature_label(feat, fields), feat.id())
         self._edit_feat_combo.blockSignals(False)
         self._edit_load_feature()
 
@@ -795,6 +883,129 @@ class KarstDialog(QDialog):
         QgsProject.instance().addMapLayer(layer)
         return layer
 
+    def _offer_schema_upgrade(self, layer, pr):
+        """Propose d'ajouter à la couche les colonnes du schéma qui lui manquent.
+
+        Demandé une seule fois par couche et par session (refus mémorisé).
+        En cas de refus, le comportement reste l'ancien : seuls les champs
+        présents sont écrits, les autres valeurs sont ignorées.
+        """
+        try:
+            existing = set(layer.fields().names())
+            expected = self._cavites_field_defs()
+            missing = [f for f in expected if f.name() not in existing]
+            if not missing:
+                return
+            asked = getattr(self, "_schema_upgrade_asked", None)
+            if asked is None:
+                asked = set()
+                self._schema_upgrade_asked = asked
+            if layer.id() in asked:
+                return
+            asked.add(layer.id())
+            names = ", ".join(f.name() for f in missing)
+            reply = QMessageBox.question(
+                self, "Schéma incomplet",
+                f"La couche « {layer.name()} » n'a pas les colonnes :\n"
+                f"{names}\n\n"
+                "Sans elles, ces valeurs ne seront PAS enregistrées "
+                "(commune, codes…).\nAjouter les colonnes manquantes ?",
+                _MsgYes | _MsgNo, _MsgYes)
+            if reply == _MsgYes:
+                pr.addAttributes(missing)
+                layer.updateFields()
+        except Exception:
+            # Jamais bloquant : en cas de pépin on retombe sur l'ancien
+            # comportement (écriture des seuls champs présents).
+            pass
+
+    def _reproject_entry_xy(self, entry, layer_crs):
+        """Coordonnées de l'entrée exprimées dans le CRS de la couche.
+
+        Reprojette depuis le CRS de capture si nécessaire. Retourne (None, None)
+        si l'entrée n'a pas de coordonnées.
+        """
+        x, y = entry.get("x"), entry.get("y")
+        if x is None or y is None:
+            return None, None
+        src = entry.get("src_crs")
+        if src is not None and src.isValid() and src != layer_crs:
+            try:
+                tr = QgsCoordinateTransform(src, layer_crs, QgsProject.instance())
+                p = tr.transform(QgsPointXY(x, y))
+                return p.x(), p.y()
+            except Exception:
+                return x, y
+        return x, y
+
+    def _load_existing_points(self, layer):
+        """Liste {ref, name, x, y} des entités de la couche (coords en CRS couche)."""
+        names = set(layer.fields().names())
+        has_name = "name" in names
+        has_ref = "reference" in names
+        out = []
+        for feat in layer.getFeatures():
+            geom = feat.geometry()
+            if geom and not geom.isEmpty():
+                pt = geom.asPoint()
+                x, y = pt.x(), pt.y()
+            else:
+                x, y = None, None
+            out.append({
+                "ref":  str(feat["reference"]) if has_ref else "",
+                "name": str(feat["name"]) if has_name else "",
+                "x": x, "y": y,
+            })
+        return out
+
+    def _confirm_skip_duplicates(self, layer, layer_crs, entry_xy):
+        """Repère les points en doublon de position (< 2 m) et demande quoi faire.
+
+        Marque entry["_is_dup"] = True pour chaque entrée coïncidant avec une
+        entité existante de la couche OU une entrée précédente de la file.
+        Retourne True si l'utilisateur choisit d'ignorer les doublons.
+        Position seule (pas le nom) : « mêmes coordonnées » = doublon.
+        """
+        tol = self._COORD_TOLERANCE
+        try:
+            seen = [e for e in self._load_existing_points(layer)
+                    if e["x"] is not None]
+        except Exception:
+            return False
+        dist = self._metric_distance_fn(layer_crs)
+
+        def is_close(x, y):
+            for e in seen:
+                if dist is not None:
+                    if dist(x, y, e["x"], e["y"]) < tol:
+                        return True
+                elif self._coords_close(x, y, e["x"], e["y"], tol):
+                    return True
+            return False
+
+        dups = 0
+        for entry, (x, y) in zip(self._queue, entry_xy):
+            entry["_is_dup"] = False
+            if x is None:
+                continue
+            if is_close(x, y):
+                entry["_is_dup"] = True
+                dups += 1
+            else:
+                seen.append({"x": x, "y": y})
+
+        if not dups:
+            return False
+        reply = QMessageBox.question(
+            self, "Doublons détectés",
+            f"{dups} point(s) coïncident avec une entité existante ou un autre "
+            f"point de la file (< {int(tol)} m).\n\n"
+            "Les ajouter quand même ?\n"
+            "• Oui : tout ajouter (doublons inclus)\n"
+            "• Non : ignorer les doublons",
+            _MsgYes | _MsgNo, _MsgNo)
+        return reply == _MsgNo
+
     def _flush_queue_to_layer(self):
         """Write all queued entries to a persistent on-disk cavités layer."""
         if not self._queue:
@@ -808,6 +1019,12 @@ class KarstDialog(QDialog):
         self._new_layer_id = layer.id()
         pr = layer.dataProvider()
 
+        # Couche au schéma incomplet (créée par une version antérieure du
+        # plugin, repackagée par QField…) : proposer UNE fois d'ajouter les
+        # colonnes manquantes. Sans cela les valeurs (ex. commune) seraient
+        # silencieusement perdues à l'écriture.
+        self._offer_schema_upgrade(layer, pr)
+
         # Champs réellement présents dans la couche cible : on n'écrit que
         # ceux-là, pour rester compatible avec un GPKG au schéma différent
         # (ex. couche repackagée par QField, champs renommés/absents).
@@ -817,26 +1034,22 @@ class KarstDialog(QDialog):
 
         layer_crs = layer.crs()
 
-        added = 0
-        for entry in self._queue:
-            x, y = entry["x"], entry["y"]
+        # Coordonnées de chaque entrée dans le CRS de la couche (reprojetées).
+        entry_xy = [self._reproject_entry_xy(e, layer_crs) for e in self._queue]
+
+        # Dédoublonnage : repérer les points qui coïncident (< 2 m) avec une
+        # entité existante OU une entrée déjà vue dans cette file. Si on en
+        # trouve, demander une fois quoi faire (jamais silencieux, jamais bloquant).
+        skip_dups = self._confirm_skip_duplicates(layer, layer_crs, entry_xy)
+
+        added = skipped = 0
+        for entry, (x, y) in zip(self._queue, entry_xy):
+            if skip_dups and entry.get("_is_dup"):
+                skipped += 1
+                continue
             feat = QgsFeature(layer.fields())
             if x is not None:
-                pt = QgsPointXY(x, y)
-                # Reprojeter du CRS de capture vers le CRS de la couche : sinon
-                # des coordonnées capturées dans un projet d'un CRS différent de
-                # celui de la couche seraient écrites brutes (géométrie fausse).
-                src = entry.get("src_crs")
-                if src is not None and src.isValid() and src != layer_crs:
-                    try:
-                        tr = QgsCoordinateTransform(src, layer_crs,
-                                                    QgsProject.instance())
-                        pt = tr.transform(pt)
-                        # garder les colonnes x/y cohérentes avec la géométrie
-                        x, y = pt.x(), pt.y()
-                    except Exception:
-                        pass
-                feat.setGeometry(QgsGeometry.fromPointXY(pt))
+                feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
             # photos écrites après coup (dépendent de la référence)
             values = {
                 "name":      entry["name"],
@@ -887,6 +1100,7 @@ class KarstDialog(QDialog):
         QMessageBox.information(
             self, "Ajouté dans QGIS",
             f"{added} entrée(s) ajoutée(s) à la couche « Inventaire Cavités »."
+            + (f"\n{skipped} doublon(s) ignoré(s)." if skipped else "")
         )
 
     def _update_queue_counter(self):
@@ -1231,6 +1445,19 @@ class KarstDialog(QDialog):
         layer_row.addWidget(btn_refresh_fiche)
         layout.addLayout(layer_row)
 
+        # Recherche (référence/nom) + filtre par type
+        filter_row = QHBoxLayout()
+        self._fiche_search = QLineEdit()
+        self._fiche_search.setPlaceholderText("🔎 Rechercher (référence, nom)…")
+        self._fiche_search.setClearButtonEnabled(True)
+        self._fiche_search.textChanged.connect(self._fiche_populate_features)
+        filter_row.addWidget(self._fiche_search, 2)
+        self._fiche_type_filter = QComboBox()
+        self._fiche_type_filter.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
+        self._fiche_type_filter.currentIndexChanged.connect(self._fiche_populate_features)
+        filter_row.addWidget(self._fiche_type_filter, 1)
+        layout.addLayout(filter_row)
+
         # Feature selector
         feat_row = QHBoxLayout()
         feat_row.addWidget(QLabel("Phénomène :"))
@@ -1279,23 +1506,35 @@ class KarstDialog(QDialog):
                 pass
             self._fiche_layer_conn = None
 
+        layer = self._fiche_current_layer()
+        combo = getattr(self, "_fiche_type_filter", None)
+        if combo is not None:
+            self._populate_type_filter(combo, layer)
+
+        self._fiche_populate_features()
+
+        # Auto-select when feature selected on canvas
+        if layer is not None:
+            self._fiche_layer_conn = layer.selectionChanged.connect(
+                self._fiche_sync_selection)
+
+    def _fiche_populate_features(self):
+        """Remplit la liste des phénomènes selon la recherche et le filtre type."""
         self._fiche_feat_combo.blockSignals(True)
         self._fiche_feat_combo.clear()
         layer = self._fiche_current_layer()
-        if layer is None:
-            self._fiche_feat_combo.blockSignals(False)
-            return
-
-        # Populate feature list using name/reference fields when available
-        for feat in layer.getFeatures():
-            label = self._fiche_feat_label(feat, layer)
-            self._fiche_feat_combo.addItem(label, feat.id())
-
+        if layer is not None:
+            fields = [f.name() for f in layer.fields()]
+            search = (self._fiche_search.text().strip().lower()
+                      if hasattr(self, "_fiche_search") else "")
+            type_f = (self._fiche_type_filter.currentData() or ""
+                      if hasattr(self, "_fiche_type_filter") else "")
+            for feat in layer.getFeatures():
+                if not self._feature_matches(feat, fields, search, type_f):
+                    continue
+                self._fiche_feat_combo.addItem(
+                    self._fiche_feat_label(feat, layer), feat.id())
         self._fiche_feat_combo.blockSignals(False)
-
-        # Auto-select when feature selected on canvas
-        self._fiche_layer_conn = layer.selectionChanged.connect(
-            self._fiche_sync_selection)
         self._fiche_show()
 
     def _fiche_feat_label(self, feat, layer):
@@ -2337,14 +2576,40 @@ class KarstDialog(QDialog):
 
     @staticmethod
     def _coords_close(x1, y1, x2, y2, tol):
-        """True si les deux points sont à moins de tol unités l'un de l'autre."""
+        """True si les deux points sont à moins de tol unités l'un de l'autre
+        (distance planaire, dans les unités du CRS des coordonnées)."""
         if None in (x1, y1, x2, y2):
             return False
         return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 < tol
 
-    def _is_duplicate(self, src_ref, src_name, src_x, src_y, existing):
+    def _metric_distance_fn(self, crs):
+        """Retourne f(x1,y1,x2,y2) -> mètres pour des coordonnées dans `crs`.
+
+        Utilise QgsDistanceArea (mesure ellipsoïdale) : correct quel que soit le
+        CRS (Lambert-93, WGS84 en degrés, Web Mercator…). Repli sur None en cas
+        d'indisponibilité → comparaison planaire dans les unités du CRS.
+        """
+        try:
+            from qgis.core import QgsUnitTypes
+            da = QgsDistanceArea()
+            da.setSourceCrs(crs, QgsProject.instance().transformContext())
+            da.setEllipsoid(QgsProject.instance().ellipsoid() or "WGS84")
+
+            def dist(x1, y1, x2, y2):
+                d = da.measureLine(QgsPointXY(x1, y1), QgsPointXY(x2, y2))
+                return da.convertLengthMeasurement(d, QgsUnitTypes.DistanceMeters)
+            return dist
+        except Exception:
+            return None
+
+    def _is_duplicate(self, src_ref, src_name, src_x, src_y, existing, dist=None):
         """
         existing : liste de dicts {ref, name, x, y} déjà dans la couche.
+        dist     : optionnel, f(x1,y1,x2,y2) -> mètres. Si fourni, la tolérance
+                   (_COORD_TOLERANCE = 2 m) est interprétée en mètres ; sinon
+                   comparaison planaire dans les unités du CRS (repli historique).
+
+        IMPORTANT : src_(x,y) et existing[].(x,y) doivent être dans le MÊME CRS.
 
         Règle 1 — référence non vide :
           Cherche la même référence. Si trouvée, compare name+coords.
@@ -2357,12 +2622,19 @@ class KarstDialog(QDialog):
         tol = self._COORD_TOLERANCE
         norm_src = self._norm_name(src_name)
 
+        def close(x1, y1, x2, y2):
+            if None in (x1, y1, x2, y2):
+                return False
+            if dist is not None:
+                return dist(x1, y1, x2, y2) < tol
+            return self._coords_close(x1, y1, x2, y2, tol)
+
         if src_ref:
             for e in existing:
                 if e["ref"] == src_ref:
                     same_name = self._norm_name(e["name"]) == norm_src
                     if e["x"] is not None and src_x is not None:
-                        same_pos = self._coords_close(src_x, src_y, e["x"], e["y"], tol)
+                        same_pos = close(src_x, src_y, e["x"], e["y"])
                     else:
                         same_pos = (e["x"] is None and src_x is None)
                     return same_name and same_pos
@@ -2372,7 +2644,7 @@ class KarstDialog(QDialog):
         for e in existing:
             same_name = self._norm_name(e["name"]) == norm_src and norm_src != ""
             if e["x"] is not None and src_x is not None:
-                same_pos = self._coords_close(src_x, src_y, e["x"], e["y"], tol)
+                same_pos = close(src_x, src_y, e["x"], e["y"])
             else:
                 same_pos = (e["x"] is None and src_x is None)
             if same_name and same_pos:
@@ -2407,13 +2679,15 @@ class KarstDialog(QDialog):
 
         existing = []  # accumule les entrées déjà ajoutées dans cette session d'import
         added = skipped = 0
+        # Distance métrique dans le CRS source (les coords comparées y sont).
+        dist = self._metric_distance_fn(QgsCoordinateReferenceSystem(src_crs_id))
 
         for row in rows:
             ref  = row.get(ref_col, "").strip()
             name = row.get("name") or row.get("Name") or row.get("nom") or ""
             x, y = self._extract_xy(row)
 
-            if self._is_duplicate(ref, name, x, y, existing):
+            if self._is_duplicate(ref, name, x, y, existing, dist):
                 skipped += 1
                 continue
 
@@ -2507,22 +2781,29 @@ class KarstDialog(QDialog):
 
         pr = layer.dataProvider()
         added = skipped = 0
+        # Distance métrique dans le CRS de destination : c'est là que sont
+        # exprimées les coords de `existing` ET les coords source transformées.
+        dist = self._metric_distance_fn(dest_crs)
 
         for row in rows:
             ref  = row.get(ref_col, "").strip()
             name = row.get("name") or row.get("Name") or row.get("nom") or ""
             x, y = self._extract_xy(row)
 
-            if self._is_duplicate(ref, name, x, y, existing):
+            # Transformer AVANT le dédoublonnage : `existing` est en CRS dest,
+            # comparer des coords source brutes (autre CRS) serait faux.
+            dx, dy = x, y
+            if x is not None and y is not None and transform:
+                tp = transform.transform(QgsPointXY(x, y))
+                dx, dy = tp.x(), tp.y()
+
+            if self._is_duplicate(ref, name, dx, dy, existing, dist):
                 skipped += 1
                 continue
 
             feat = QgsFeature(layer.fields())
-            if x is not None and y is not None:
-                pt = QgsPointXY(x, y)
-                if transform:
-                    pt = transform.transform(pt)
-                feat.setGeometry(QgsGeometry.fromPointXY(pt))
+            if dx is not None and dy is not None:
+                feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(dx, dy)))
 
             # Génère une référence si absente et que le champ existe
             if not ref and dest_ref_field and dest_ref_field in dest_fields:
@@ -2535,7 +2816,8 @@ class KarstDialog(QDialog):
                 feat.setAttribute(dest_ref_field, ref)
 
             pr.addFeature(feat)
-            existing.append({"ref": ref, "name": name, "x": x, "y": y})
+            # Coords en CRS dest (dx, dy) pour rester cohérent avec `existing`.
+            existing.append({"ref": ref, "name": name, "x": dx, "y": dy})
             added += 1
 
         layer.updateExtents()
@@ -2641,8 +2923,9 @@ class KarstDialog(QDialog):
         tout appel. Résultat : un seul appel par commune distincte, pas par
         cavité — et c'est exact (vrai PIP, pas un arrondi de coordonnées).
 
-        Non bloquant en cas d'échec (hors-ligne, API indisponible, hors France) :
-        les champs sont simplement laissés en l'état, sans erreur ni dialogue.
+        L'appel réseau s'exécute dans un thread : l'interface ne gèle jamais,
+        même hors-ligne. En cas d'échec un indicateur discret est affiché sous
+        les champs (jamais de dialogue bloquant), la saisie reste possible.
         """
         try:
             proj_crs = self.canvas.mapSettings().destinationCrs()
@@ -2653,115 +2936,102 @@ class KarstDialog(QDialog):
                 pt = tr.transform(point)
             lon, lat = pt.x(), pt.y()
 
-            # 1. Cache : le point tombe-t-il dans une commune déjà connue ?
-            info = None
+            self._ensure_commune_cache_loaded()
+
+            # 1. Cache local (point-dans-polygone) : réponse immédiate, sans réseau.
             for polygons, cached_info in self._commune_cache:
                 if self._point_in_polygons(lon, lat, polygons):
-                    info = cached_info
-                    break
-
-            # 2. Sinon, appel réseau + mise en cache du contour.
-            if info is None:
-                result = self._reverse_geocode(lat, lon)
-                if not result:
+                    self._apply_admin_info(cached_info)
+                    self._set_admin_status("")
                     return
-                polygons = self._parse_geojson_polygons(result.pop("_contour", None))
-                info = result
-                if polygons:
-                    self._commune_cache.append((polygons, info))
+
+            # 2. Sinon, appel réseau DANS UN THREAD : la saisie ne gèle jamais,
+            #    même hors-ligne avec un long timeout. Le résultat revient sur le
+            #    thread UI via le signal _admin_fetched (connexion queued).
+            self._admin_gen += 1
+            gen = self._admin_gen
+            self._set_admin_status("Recherche de la commune…")
+
+            def _worker():
+                result = self._reverse_geocode(lat, lon)
+                try:
+                    self._admin_fetched.emit(result, gen)
+                except RuntimeError:
+                    pass  # dialogue fermé pendant la requête
+
+            threading.Thread(target=_worker, daemon=True).start()
         except Exception:
             return
-        if not info:
+
+    def _on_admin_fetched(self, result, gen):
+        """Reçoit (thread UI) le résultat du géocodage asynchrone."""
+        if gen != self._admin_gen:
+            return  # réponse obsolète : un nouveau point a été capturé depuis
+        if not result:
+            # Échec signalé mais jamais bloquant : champs laissés en l'état.
+            self._set_admin_status(
+                "⚠ Commune non renseignée (hors ligne ou point hors France). "
+                "Saisie possible à la main.")
             return
+        polygons = self._parse_geojson_polygons(result.pop("_contour", None))
+        if polygons:
+            self._commune_cache.append((polygons, result))
+            self._save_commune_cache()
+        self._apply_admin_info(result)
+        self._set_admin_status("")
+
+    # ---- Cache communal persistant (un fichier JSON dans le dossier projet) --
+
+    def _commune_cache_dir(self):
+        """Dossier du projet QGIS courant, ou '' si le projet n'est pas enregistré."""
+        try:
+            return QgsProject.instance().absolutePath() or ""
+        except Exception:
+            return ""
+
+    def _ensure_commune_cache_loaded(self):
+        """Charge une seule fois le cache communal depuis le disque (best effort)."""
+        if getattr(self, "_commune_cache_loaded", False):
+            return
+        self._commune_cache_loaded = True
+        try:
+            loaded = geocode_utils.load_commune_cache(self._commune_cache_dir())
+            known = {info.get("code_insee") for _, info in self._commune_cache}
+            for polygons, info in loaded:
+                if info.get("code_insee") not in known:
+                    self._commune_cache.append((polygons, info))
+        except Exception:
+            pass
+
+    def _save_commune_cache(self):
+        """Écrit le cache communal sur disque (best effort, jamais bloquant)."""
+        try:
+            geocode_utils.save_commune_cache(
+                self._commune_cache_dir(), self._commune_cache)
+        except Exception:
+            pass
+
+    def _apply_admin_info(self, info):
+        """Remplit les champs commune / CP / département depuis un dict info."""
         self._f_commune.setText(info.get("commune", ""))
         self._f_code_postal.setText(info.get("code_postal", ""))
         self._f_departement.setText(info.get("departement", ""))
         self._f_code_insee.setText(info.get("code_insee", ""))
         self._f_code_dept.setText(info.get("code_dept", ""))
 
-    @staticmethod
-    def _reverse_geocode(lat, lon, timeout=3.0):
-        """Géocodage inverse via geo.api.gouv.fr (point-dans-polygone communal).
-
-        Retourne un dict commune/code_insee/code_postal/departement/code_dept,
-        plus « _contour » (géométrie GeoJSON de la commune, pour mise en cache),
-        ou None en cas d'échec (réseau, hors France, réponse vide). Ne lève
-        jamais d'exception.
-        """
-        import json
-        import urllib.parse
-        import urllib.request
-        params = urllib.parse.urlencode({
-            "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
-            "fields": "nom,code,codesPostaux,departement,contour",
-            "format": "json", "geometry": "contour",
-        })
-        url = f"https://geo.api.gouv.fr/communes?{params}"
+    def _set_admin_status(self, text):
+        """Met à jour l'indicateur d'état du géocodage (silencieux si absent)."""
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception:
-            return None
-        if not data:
-            return None
-        c = data[0]
-        cps = c.get("codesPostaux") or []
-        dep = c.get("departement") or {}
-        return {
-            "commune":     c.get("nom", ""),
-            "code_insee":  c.get("code", ""),
-            "code_postal": cps[0] if cps else "",
-            "departement": dep.get("nom", ""),
-            "code_dept":   dep.get("code", ""),
-            "_contour":    c.get("contour"),
-        }
+            self._admin_status.setText(text)
+        except (AttributeError, RuntimeError):
+            pass
 
-    @staticmethod
-    def _parse_geojson_polygons(geom):
-        """Normalise une géométrie GeoJSON en liste de polygones.
-
-        Chaque polygone = liste d'anneaux ; chaque anneau = liste de (lon, lat).
-        Le 1er anneau est l'extérieur, les suivants des trous. Retourne [] si la
-        géométrie est absente ou non polygonale.
-        """
-        if not geom:
-            return []
-        gtype = geom.get("type")
-        coords = geom.get("coordinates")
-        if not coords:
-            return []
-        if gtype == "Polygon":
-            return [coords]
-        if gtype == "MultiPolygon":
-            return list(coords)
-        return []
-
-    @staticmethod
-    def _point_in_ring(lon, lat, ring):
-        """Ray casting : True si (lon, lat) est à l'intérieur de l'anneau."""
-        inside = False
-        n = len(ring)
-        j = n - 1
-        for i in range(n):
-            xi, yi = ring[i][0], ring[i][1]
-            xj, yj = ring[j][0], ring[j][1]
-            if ((yi > lat) != (yj > lat)) and \
-                    (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi):
-                inside = not inside
-            j = i
-        return inside
-
-    @classmethod
-    def _point_in_polygons(cls, lon, lat, polygons):
-        """True si le point est dans l'un des polygones (extérieur, hors trous)."""
-        for polygon in polygons:
-            if not polygon:
-                continue
-            if cls._point_in_ring(lon, lat, polygon[0]) and \
-                    not any(cls._point_in_ring(lon, lat, hole)
-                            for hole in polygon[1:]):
-                return True
-        return False
+    # Délégations vers geocode_utils (fonctions pures, testables, thread-safe).
+    # Conservées comme méthodes pour la compatibilité (tests, surcharge).
+    _reverse_geocode = staticmethod(geocode_utils.reverse_geocode)
+    _parse_geojson_polygons = staticmethod(geocode_utils.parse_geojson_polygons)
+    _point_in_ring = staticmethod(geocode_utils.point_in_ring)
+    _point_in_polygons = staticmethod(geocode_utils.point_in_polygons)
 
     def _reset_capture(self):
         """Restaure l'outil carte précédent et remet le bouton capture à l'état initial."""
