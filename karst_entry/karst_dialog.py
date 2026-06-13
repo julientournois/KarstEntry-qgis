@@ -1688,7 +1688,7 @@ class KarstDialog(QDialog):
         scroll.setWidget(form_widget)
 
         # --- Source (perte) ---
-        src_group = QGroupBox("Source — Perte / Gouffre")
+        src_group = QGroupBox("Point d'injection du colorant")
         src_layout = QFormLayout(src_group)
 
         self._tr_src_layer = QComboBox()
@@ -1719,7 +1719,7 @@ class KarstDialog(QDialog):
         form.addRow(src_group)
 
         # --- Destination (résurgence) ---
-        dst_group = QGroupBox("Destination — Résurgence")
+        dst_group = QGroupBox("Sortie du colorant")
         dst_layout = QFormLayout(dst_group)
 
         self._tr_dst_layer = QComboBox()
