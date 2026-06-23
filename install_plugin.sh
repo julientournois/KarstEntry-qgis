@@ -24,7 +24,7 @@ QGIS_HOME="${QGIS_DATA_HOME:-$HOME/.local/share/QGIS}"
 
 # Fichiers/dossiers à ne pas déployer dans le plugin installé.
 EXCLUDES=(
-    ".git" ".gitignore" "__pycache__" ".pytest_cache"
+    ".git" ".github" ".gitignore" "__pycache__" ".pytest_cache"
     "tests" "docs/build_guide_pdf.py"
     "install_plugin.bat" "install_plugin.sh"
 )

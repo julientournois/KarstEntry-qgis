@@ -4,6 +4,56 @@ Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
 avec **KarstPro** (`karst_schema.json`, v1.2.0).
 
+## [1.1] — 2026-06-14
+
+### Schéma
+- **Champ `altitude`** (Double, mètres) ajouté aux couches `cavites` et
+  `cavites_connues` — **schéma v1.3.0**. Saisi dans le formulaire, exporté en
+  `ele` GPX, mappé automatiquement depuis `alt`/`altitude` à l'import.
+  ⚠ À répercuter **à l'identique dans KarstPro** (schéma partagé).
+
+### Ajouté
+- **Placement du point depuis une photo géolocalisée** (EXIF GPS) : à l'ajout
+  de photos, si aucune position n'est saisie, proposition de placer la cavité
+  à l'emplacement de la photo (via `QgsExifTools`, sans dépendance).
+- **Export GPX** des cavités en waypoints (WGS84) pour recharger l'inventaire
+  sur un GPS de terrain.
+- **Export ZIP** : archive unique CSV + photos (portable, à partager d'un bloc).
+- **Import CSV → nouvelle couche persistante** : possibilité d'enregistrer la
+  couche créée dans un GeoPackage sur disque (emplacement au choix), au lieu
+  d'une couche mémoire volatile.
+- **Symbologie automatique** appliquée à la création des couches **et à
+  l'import** (nouvelle couche avec champ `type`) : cavités catégorisées par
+  `type`, traçages par `resultat` ; style enregistré dans le GeoPackage
+  (repris par QField et aux réouvertures).
+- **Onglet Stats** : statistiques par commune (nombre, développement cumulé,
+  ventilation par type) avec export CSV du récapitulatif, et bouton
+  **« Remplir les communes manquantes »** — géocodage par lot (asynchrone,
+  cache communal, ne touche que les champs vides) des entités sans commune.
+
+- **Choix de la couche de destination** (Saisie, Traçage, Import CSV) : couche
+  existante (avec **validation du schéma** — géométrie vérifiée, ajout des
+  colonnes manquantes proposé) ou **nouvelle couche au nom choisi** (défaut
+  « Inventaire Cavités » / « Inventaire Traçages »).
+
+- **Import CSV — mapping universel** : correspondance automatique des colonnes
+  insensible à la casse, aux accents et aux espaces, avec **synonymes**
+  (`numero`→`reference`, `nom`→`name`, `lon`/`long`→`x`, `lat`→`y`,
+  `alt`→`altitude`, `commentaire`→`comment`…). Lecture x/y tolérante de même.
+
+### Corrigé
+- **Import CSV** : en-têtes avec espaces parasites (« nom ») désormais
+  normalisés (ne cassent plus la lecture des valeurs).
+- **Import CSV** : détection automatique de l'encodage (UTF-8 / Windows-1252) —
+  les CSV produits sous Excel FR (« é » = 0xe9) ne provoquent plus d'erreur de
+  décodage.
+
+### Qualité
+- **Smoke tests d'intégration** sous un vrai PyQGIS (construction des onglets,
+  mesure géodésique, aller-retour GeoPackage).
+- **Intégration continue** (GitHub Actions) : suite mockée + smoke QGIS à
+  chaque push.
+
 ## [1.0] — 2026-06-13
 
 Première version stable et son affinage. Saisie de terrain des phénomènes

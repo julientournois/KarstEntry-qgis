@@ -33,7 +33,7 @@ import csv
 import json
 import shutil
 import threading
-import unicodedata
+import zipfile
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit,
@@ -48,12 +48,19 @@ from qgis.PyQt.QtGui import QPixmap, QIcon
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry, QgsPointXY,
     QgsField, QgsWkbTypes, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-    QgsDistanceArea, QgsVectorFileWriter
+    QgsDistanceArea, QgsVectorFileWriter,
+    QgsCategorizedSymbolRenderer, QgsRendererCategory,
+    QgsMarkerSymbol, QgsLineSymbol,
 )
+try:
+    from qgis.core import QgsExifTools  # géotag des photos (QGIS ≥ 3.6)
+except ImportError:  # pragma: no cover
+    QgsExifTools = None
 from qgis.gui import QgsProjectionSelectionDialog
 
 from .map_tool import PointCaptureTool
 from . import geocode_utils
+from . import feature_utils
 
 # ---------------------------------------------------------------------------
 # Compatibilité PyQt5 (QGIS 3) / PyQt6 (QGIS 4) — les enums Qt ont été
@@ -114,6 +121,37 @@ KARST_TYPES = [
     "Inversac", "Vallée Sèche", "Lapiaz", "Canyon", "Faille", "Autre"
 ]
 
+# Couleurs de symbologie par type de cavité (palette « Roche » + contrastes).
+_TYPE_COLORS = {
+    "Gouffre":      "#C0392B",  # rouge
+    "Résurgence":   "#2E86C1",  # eau (sortie)
+    "Perte":        "#C0392B",  # rouge
+    "Grotte":       "#7D6608",  # ocre sombre
+    "Doline":       "#BB6A2E",  # ocre
+    "Inversac":     "#1ABC9C",
+    "Vallée Sèche": "#A89A82",  # grès
+    "Lapiaz":       "#909497",
+    "Canyon":       "#884EA0",
+    "Faille":       "#000000",  # noir
+    "Autre":        "#FFFFFF",  # blanc
+}
+_TYPE_COLOR_DEFAULT = "#A89A82"
+
+# Forme du marqueur par type (défaut : cercle).
+_TYPE_MARKERS = {
+    "Gouffre": "star",
+}
+_TYPE_MARKER_DEFAULT = "circle"
+_TYPE_MARKER_SIZE = "1.5"
+
+# Couleurs de symbologie des traçages par résultat.
+_RESULT_COLORS = {
+    "Positif":      "#27AE60",
+    "Négatif":      "#C0392B",
+    "Indéterminé":  "#909497",
+}
+_RESULT_COLOR_DEFAULT = "#BB6A2E"
+
 # Taille en pixels des miniatures photo dans la liste.
 PHOTO_THUMB_SIZE = 80
 
@@ -145,7 +183,8 @@ _QVARIANT_BY_TYPE = {
 _FALLBACK_CAVITES_FIELDS = {
     "name": "str", "type": "str", "reference": "str", "comment": "str",
     "dim_entree_longueur": "float", "dim_entree_largeur": "float",
-    "developpement_estime": "float", "topographiable": "int64", "lien_topo": "str",
+    "developpement_estime": "float", "altitude": "float",
+    "topographiable": "int64", "lien_topo": "str",
     "date_disc": "str", "date_expl": "str", "prot_id": "str", "explorers": "str",
     "photos": "str", "commune": "str", "code_insee": "str", "code_postal": "str",
     "departement": "str", "code_dept": "str",
@@ -258,6 +297,10 @@ class KarstDialog(QDialog):
     # Émis depuis le thread de travail ; Qt route vers le thread UI (queued).
     _admin_fetched = pyqtSignal(object, int)
 
+    # Géocodage par lot (onglet Stats) : (results_dict, filled, failed, layer_id).
+    _geofill_done = pyqtSignal(object, int, int, str)
+    _geofill_progress = pyqtSignal(int, int)
+
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface  = iface
@@ -283,6 +326,9 @@ class KarstDialog(QDialog):
         # qui arrive après une nouvelle capture est obsolète et ignorée.
         self._admin_gen      = 0
         self._admin_fetched.connect(self._on_admin_fetched)
+        self._geofill_busy = False
+        self._geofill_done.connect(self._on_geofill_done)
+        self._geofill_progress.connect(self._on_geofill_progress)
 
         self.setWindowTitle("Saisie du Phénomène Karstique")
         self.setMinimumWidth(580)
@@ -303,6 +349,7 @@ class KarstDialog(QDialog):
         self._tabs.addTab(self._build_delete_tab(), "🗑 Suppression")
         self._tabs.addTab(self._build_fiche_tab(), "🔍 Fiche")
         self._tabs.addTab(self._build_views_tab(), "🗂 Vues")
+        self._tabs.addTab(self._build_stats_tab(), "📊 Stats")
         self._tabs.addTab(self._build_import_tab(), "📥 Import CSV")
         self._tabs.addTab(self._build_info_tab(), "ℹ Info")
         root.addWidget(self._tabs)
@@ -384,6 +431,10 @@ class KarstDialog(QDialog):
         self._f_code_insee = QLineEdit()
         self._f_code_dept = QLineEdit()
 
+        self._f_altitude = QLineEdit()
+        self._f_altitude.setPlaceholderText("mètres (optionnel)")
+        form.addRow("Altitude (m)", self._f_altitude)
+
         # Coordinates
         coord_group = QGroupBox("Coordonnées (clic sur la carte)")
         coord_layout = QHBoxLayout(coord_group)
@@ -427,10 +478,30 @@ class KarstDialog(QDialog):
         form.addRow(photo_group)
         layout.addWidget(scroll)
 
+        # Couche active (ajout / export) — par défaut « Inventaire Cavités ».
+        dest_group = QGroupBox("Couche active (ajout / export)")
+        dest_layout = QHBoxLayout(dest_group)
+        dest_layout.addWidget(QLabel("Couche :"))
+        self._new_target_combo = QComboBox()
+        self._new_target_combo.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
+        self._new_target_combo.currentIndexChanged.connect(self._new_target_changed)
+        dest_layout.addWidget(self._new_target_combo, 1)
+        btn_dest_refresh = QPushButton("↻")
+        btn_dest_refresh.setFixedWidth(32)
+        btn_dest_refresh.clicked.connect(self._populate_new_targets)
+        dest_layout.addWidget(btn_dest_refresh)
+        self._new_name_edit = QLineEdit()
+        self._new_name_edit.setPlaceholderText("nom de la nouvelle couche")
+        self._new_name_edit.setText(self._CAVITES_LAYER_NAME)
+        dest_layout.addWidget(self._new_name_edit, 1)
+        layout.addWidget(dest_group)
+
         # Queue counter
         self._lbl_queue = QLabel("File d'attente : 0 point(s)")
         self._lbl_queue.setStyleSheet("font-weight: bold; color: #555;")
         layout.addWidget(self._lbl_queue)
+
+        self._populate_new_targets()
 
         btn_row = QHBoxLayout()
 
@@ -450,6 +521,16 @@ class KarstDialog(QDialog):
         btn_export = QPushButton("📤 Exporter en CSV")
         btn_export.clicked.connect(self._export_csv)
         btn_row.addWidget(btn_export)
+
+        btn_gpx = QPushButton("🛰 Exporter en GPX")
+        btn_gpx.setToolTip("Waypoints GPS (WGS84) à recharger sur un GPS de terrain")
+        btn_gpx.clicked.connect(self._export_gpx)
+        btn_row.addWidget(btn_gpx)
+
+        btn_zip = QPushButton("🗜 Exporter en ZIP")
+        btn_zip.setToolTip("Archive unique : CSV + photos (portable)")
+        btn_zip.clicked.connect(self._export_zip)
+        btn_row.addWidget(btn_zip)
 
         layout.addLayout(btn_row)
         return tab
@@ -539,53 +620,10 @@ class KarstDialog(QDialog):
         return QgsProject.instance().mapLayer(layer_id)
 
     # --- Recherche / filtre par type (partagé Modification & Fiche) ----------
-
-    @staticmethod
-    def _feature_label(feat, fields):
-        """Libellé d'une entité : « référence — nom », repli sur nom puis #id."""
-        if "reference" in fields and feat["reference"]:
-            label = str(feat["reference"])
-            if "name" in fields and feat["name"]:
-                label += f" — {feat['name']}"
-        elif "name" in fields and feat["name"]:
-            label = str(feat["name"])
-        else:
-            label = f"#{feat.id()}"
-        return label
-
-    @staticmethod
-    def _fold(text):
-        """Normalise pour comparaison : minuscules + suppression des accents.
-
-        « Résurgence » → « resurgence », « Vallée Sèche » → « vallee seche ».
-        Permet une recherche insensible à la casse ET aux accents.
-        """
-        if not text:
-            return ""
-        norm = unicodedata.normalize("NFKD", str(text))
-        return "".join(c for c in norm if not unicodedata.combining(c)).lower()
-
-    @staticmethod
-    def _feature_matches(feat, fields, search, type_filter):
-        """True si l'entité passe le filtre type ET la recherche texte.
-
-        search : sous-chaîne cherchée dans référence + nom + type, insensible
-                 à la casse ET aux accents.
-        type_filter : valeur exacte du champ `type` ; vide = tous.
-        """
-        ftype = str(feat["type"]) if "type" in fields and feat["type"] else ""
-        if type_filter and ftype != type_filter:
-            return False
-        if search:
-            parts = []
-            for f in ("reference", "name"):
-                if f in fields and feat[f]:
-                    parts.append(str(feat[f]))
-            if ftype:
-                parts.append(ftype)
-            if KarstDialog._fold(search) not in KarstDialog._fold(" ".join(parts)):
-                return False
-        return True
+    # Délégations vers feature_utils (fonctions pures, testables sans QGIS).
+    _feature_label = staticmethod(feature_utils.feature_label)
+    _fold = staticmethod(feature_utils.fold)
+    _feature_matches = staticmethod(feature_utils.feature_matches)
 
     @staticmethod
     def _populate_type_filter(combo, layer):
@@ -714,6 +752,52 @@ class KarstDialog(QDialog):
                 item.setData(_UserRole, path)
                 item.setToolTip(path)
                 self._photo_list.addItem(item)
+        # Si aucune position n'est encore saisie, proposer de la déduire d'une
+        # photo géolocalisée (EXIF GPS).
+        if paths and self._captured_point is None:
+            self._offer_geotag_from_photos(paths)
+
+    @staticmethod
+    def _photo_geotag(path):
+        """Coordonnées (lon, lat) WGS84 du géotag EXIF d'une photo, ou None."""
+        if QgsExifTools is None:
+            return None
+        try:
+            if not QgsExifTools.hasGeoTag(path):
+                return None
+            pt = QgsExifTools.getGeoTag(path)
+            # getGeoTag renvoie un QgsPoint(X,Y[,Z]) en WGS84.
+            return (pt.x(), pt.y())
+        except Exception:
+            return None
+
+    def _offer_geotag_from_photos(self, paths):
+        """Propose de placer le point depuis la 1re photo géolocalisée trouvée."""
+        for path in paths:
+            lonlat = self._photo_geotag(path)
+            if not lonlat:
+                continue
+            lon, lat = lonlat
+            reply = QMessageBox.question(
+                self, "Photo géolocalisée",
+                f"« {os.path.basename(path)} » contient une position GPS.\n"
+                "Placer le point de la cavité à cet emplacement ?",
+                _MsgYes | _MsgNo, _MsgYes)
+            if reply != _MsgYes:
+                return
+            try:
+                proj_crs = self.canvas.mapSettings().destinationCrs()
+                wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+                pt = QgsPointXY(lon, lat)
+                if proj_crs != wgs84:
+                    tr = QgsCoordinateTransform(wgs84, proj_crs,
+                                                QgsProject.instance())
+                    pt = tr.transform(pt)
+                self._apply_captured_point(pt)
+            except Exception:
+                QMessageBox.warning(self, "Erreur",
+                                    "Impossible de reprojeter la position de la photo.")
+            return
 
     def _remove_selected_photo(self):
         for item in self._photo_list.selectedItems():
@@ -771,6 +855,7 @@ class KarstDialog(QDialog):
             "code_postal": self._f_code_postal.text().strip(),
             "departement": self._f_departement.text().strip(),
             "code_dept":   self._f_code_dept.text().strip(),
+            "altitude":  self._try_float(self._f_altitude.text()),
             "x":         x,
             "y":         y,
             # CRS dans lequel x/y sont exprimés (= CRS du canevas à la capture).
@@ -819,6 +904,105 @@ class KarstDialog(QDialog):
             _schema_fields("cavites_connues", _FALLBACK_CAVITES_FIELDS),
             extra=[("x", QVariant.Double), ("y", QVariant.Double)])
 
+    # ---- Sélection de la couche de destination (Saisie) ---------------------
+
+    def _populate_new_targets(self):
+        """Peuple le sélecteur de couche cible : « Nouvelle couche » + couches point."""
+        combo = self._new_target_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("➕ Nouvelle couche", "__new__")
+        default_index = 0
+        for layer in QgsProject.instance().mapLayers().values():
+            if not (hasattr(layer, "getFeatures") and hasattr(layer, "fields")):
+                continue
+            try:
+                if not layer.isValid() or layer.geometryType() != QgsWkbTypes.PointGeometry:
+                    continue
+                name, lid = layer.name(), layer.id()
+            except (AttributeError, RuntimeError):
+                continue
+            combo.addItem(name, lid)
+            if name == self._CAVITES_LAYER_NAME:
+                default_index = combo.count() - 1
+        combo.setCurrentIndex(default_index)
+        combo.blockSignals(False)
+        self._new_target_changed()
+
+    def _new_target_changed(self):
+        """Le champ « nom » n'est actif que pour la création d'une nouvelle couche."""
+        is_new = self._new_target_combo.currentData() == "__new__"
+        self._new_name_edit.setEnabled(is_new)
+
+    def _ensure_layer_schema(self, layer, kind):
+        """Vérifie qu'une couche choisie correspond au schéma attendu.
+
+        Géométrie incompatible → échec. Champs manquants → propose de les
+        ajouter (migration). Retourne True si la couche est utilisable.
+        """
+        if kind == "cavites":
+            expected = self._cavites_field_defs()
+            want_geom, glabel = QgsWkbTypes.PointGeometry, "points (cavités)"
+        else:
+            expected = self._tracages_field_defs()
+            want_geom, glabel = QgsWkbTypes.LineGeometry, "lignes (traçages)"
+        try:
+            if layer.geometryType() != want_geom:
+                QMessageBox.warning(
+                    self, "Couche incompatible",
+                    f"« {layer.name()} » n'est pas une couche de {glabel}.\n"
+                    "Choisissez une autre couche.")
+                return False
+            present = set(layer.fields().names())
+        except (AttributeError, RuntimeError):
+            QMessageBox.warning(self, "Couche illisible", "Couche inutilisable.")
+            return False
+        missing = [f for f in expected if f.name() not in present]
+        if missing:
+            names = ", ".join(f.name() for f in missing)
+            reply = QMessageBox.question(
+                self, "Schéma incomplet",
+                f"« {layer.name()} » n'a pas les colonnes du schéma :\n{names}\n\n"
+                "Les ajouter à la couche ?", _MsgYes | _MsgNo, _MsgYes)
+            if reply != _MsgYes:
+                return False
+            try:
+                layer.dataProvider().addAttributes(missing)
+                layer.updateFields()
+            except Exception:
+                QMessageBox.warning(self, "Échec",
+                                    "Impossible d'ajouter les colonnes.")
+                return False
+        return True
+
+    def _target_cavites_layer(self):
+        """Couche cible des cavités selon le sélecteur (existante validée ou nouvelle)."""
+        data = self._new_target_combo.currentData() \
+            if hasattr(self, "_new_target_combo") else "__new__"
+        if data and data != "__new__":
+            layer = QgsProject.instance().mapLayer(data)
+            if layer is None:
+                QMessageBox.warning(self, "Couche introuvable",
+                                    "La couche choisie n'existe plus.")
+                return None
+            if not self._ensure_layer_schema(layer, "cavites"):
+                return None
+            return layer
+        name = (self._new_name_edit.text().strip()
+                if hasattr(self, "_new_name_edit") else "") or self._CAVITES_LAYER_NAME
+        return self._create_persistent_cavites_layer(name)
+
+    def _selected_export_layer(self):
+        """Couche pour l'export : celle choisie dans « Couche de destination »
+        si c'est une couche existante, sinon la couche cavités résolue."""
+        data = self._new_target_combo.currentData() \
+            if hasattr(self, "_new_target_combo") else None
+        if data and data != "__new__":
+            layer = QgsProject.instance().mapLayer(data)
+            if layer is not None:
+                return layer
+        return self._resolve_cavites_layer()
+
     def _resolve_cavites_layer(self):
         """Retrouve une couche cavités existante dans le projet, sans en créer.
 
@@ -852,33 +1036,34 @@ class KarstDialog(QDialog):
         self._new_layer_id = candidates[0].id()
         return candidates[0]
 
-    def _create_persistent_cavites_layer(self):
+    def _create_persistent_cavites_layer(self, name=None):
         """Crée une couche cavités PERSISTANTE (GeoPackage sur disque), pas en mémoire.
 
-        Le fichier est créé dans le dossier du projet s'il est enregistré, sinon
-        l'utilisateur choisit l'emplacement. Renvoie la couche ogr chargée, ou
-        None si l'utilisateur annule.
+        `name` : nom de la couche (défaut « Inventaire Cavités »). Le fichier est
+        créé dans le dossier du projet s'il est enregistré, sinon l'utilisateur
+        choisit l'emplacement. Renvoie la couche ogr chargée, ou None si annulé.
         """
+        name = name or self._CAVITES_LAYER_NAME
         proj_dir = QgsProject.instance().absolutePath()
         if proj_dir:
-            path = os.path.join(proj_dir, f"{self._CAVITES_LAYER_NAME}.gpkg")
+            path = os.path.join(proj_dir, f"{name}.gpkg")
         else:
             path, _ = QFileDialog.getSaveFileName(
                 self, "Enregistrer la couche cavités",
-                f"{self._CAVITES_LAYER_NAME}.gpkg", "GeoPackage (*.gpkg)")
+                f"{name}.gpkg", "GeoPackage (*.gpkg)")
             if not path:
                 return None
 
         # Si le fichier existe déjà, le charger plutôt que l'écraser.
-        if not os.path.isfile(path):
+        created = not os.path.isfile(path)
+        if created:
             crs = self.canvas.mapSettings().destinationCrs()
-            mem = QgsVectorLayer(f"Point?crs={crs.authid()}",
-                                 self._CAVITES_LAYER_NAME, "memory")
+            mem = QgsVectorLayer(f"Point?crs={crs.authid()}", name, "memory")
             mem.dataProvider().addAttributes(self._cavites_field_defs())
             mem.updateFields()
             options = QgsVectorFileWriter.SaveVectorOptions()
             options.driverName = "GPKG"
-            options.layerName = self._CAVITES_LAYER_NAME
+            options.layerName = name
             ctx = QgsProject.instance().transformContext()
             try:
                 res = QgsVectorFileWriter.writeAsVectorFormatV3(mem, path, ctx, options)
@@ -889,13 +1074,68 @@ class KarstDialog(QDialog):
                                     f"Impossible de créer le GeoPackage :\n{res[1]}")
                 return None
 
-        layer = QgsVectorLayer(path, self._CAVITES_LAYER_NAME, "ogr")
+        layer = QgsVectorLayer(path, name, "ogr")
         if not layer.isValid():
             QMessageBox.warning(self, "Couche invalide",
                                 f"Le GeoPackage créé est illisible :\n{path}")
             return None
+        if created:
+            self._apply_cavites_style(layer)
         QgsProject.instance().addMapLayer(layer)
         return layer
+
+    # ---- Symbologie automatique (catégorisée par type / résultat) -----------
+
+    @staticmethod
+    def _save_style_to_gpkg(layer):
+        """Enregistre le style courant comme style par défaut dans le GPKG.
+
+        Permet à QField et aux réouvertures de retrouver la symbologie.
+        Best effort : silencieux si la couche n'est pas sur disque.
+        """
+        try:
+            layer.saveStyleToDatabase(layer.name(), "Style Karst Entry", True, "")
+        except Exception:
+            pass
+
+    def _apply_cavites_style(self, layer):
+        """Applique une symbologie catégorisée par `type` à la couche cavités."""
+        try:
+            cats = []
+            for t in KARST_TYPES:
+                color = _TYPE_COLORS.get(t, _TYPE_COLOR_DEFAULT)
+                marker = _TYPE_MARKERS.get(t, _TYPE_MARKER_DEFAULT)
+                sym = QgsMarkerSymbol.createSimple(
+                    {"name": marker, "color": color, "size": _TYPE_MARKER_SIZE,
+                     "outline_color": "#2C2620", "outline_width": "0.3"})
+                cats.append(QgsRendererCategory(t, sym, t))
+            # Catégorie par défaut (valeurs hors liste / vides).
+            default_sym = QgsMarkerSymbol.createSimple(
+                {"name": _TYPE_MARKER_DEFAULT, "color": _TYPE_COLOR_DEFAULT,
+                 "size": _TYPE_MARKER_SIZE,
+                 "outline_color": "#2C2620", "outline_width": "0.3"})
+            cats.append(QgsRendererCategory("", default_sym, "Autre / non renseigné"))
+            layer.setRenderer(QgsCategorizedSymbolRenderer("type", cats))
+            layer.triggerRepaint()
+            self._save_style_to_gpkg(layer)
+        except Exception:
+            pass  # symbologie = confort, jamais bloquant
+
+    def _apply_tracages_style(self, layer):
+        """Applique une symbologie catégorisée par `resultat` aux traçages."""
+        try:
+            cats = []
+            for r, color in _RESULT_COLORS.items():
+                sym = QgsLineSymbol.createSimple({"color": color, "width": "0.7"})
+                cats.append(QgsRendererCategory(r, sym, r))
+            default_sym = QgsLineSymbol.createSimple(
+                {"color": _RESULT_COLOR_DEFAULT, "width": "0.7"})
+            cats.append(QgsRendererCategory("", default_sym, "Non renseigné"))
+            layer.setRenderer(QgsCategorizedSymbolRenderer("resultat", cats))
+            layer.triggerRepaint()
+            self._save_style_to_gpkg(layer)
+        except Exception:
+            pass
 
     def _offer_schema_upgrade(self, layer, pr):
         """Propose d'ajouter à la couche les colonnes du schéma qui lui manquent.
@@ -1025,18 +1265,17 @@ class KarstDialog(QDialog):
         if not self._queue:
             return
 
-        layer = self._resolve_cavites_layer()
+        # Couche cible selon le sélecteur « Couche de destination » :
+        # couche existante (validée, migration proposée si champs manquants)
+        # ou nouvelle couche au nom choisi.
+        layer = self._target_cavites_layer()
         if layer is None:
-            layer = self._create_persistent_cavites_layer()
-        if layer is None:
-            return  # création annulée par l'utilisateur
+            return  # annulé / couche refusée
         self._new_layer_id = layer.id()
         pr = layer.dataProvider()
 
-        # Couche au schéma incomplet (créée par une version antérieure du
-        # plugin, repackagée par QField…) : proposer UNE fois d'ajouter les
-        # colonnes manquantes. Sans cela les valeurs (ex. commune) seraient
-        # silencieusement perdues à l'écriture.
+        # Filet supplémentaire : couche réutilisée au schéma incomplet
+        # (sécurité ; pour une couche choisie c'est déjà géré en amont).
         self._offer_schema_upgrade(layer, pr)
 
         # Champs réellement présents dans la couche cible : on n'écrit que
@@ -1078,6 +1317,8 @@ class KarstDialog(QDialog):
                 "code_postal": entry.get("code_postal", ""),
                 "departement": entry.get("departement", ""),
                 "code_dept":   entry.get("code_dept", ""),
+                "altitude":  entry.get("altitude") if entry.get("altitude") is not None
+                             else QVariant(),
                 "x":         x if x is not None else QVariant(),
                 "y":         y if y is not None else QVariant(),
             }
@@ -1139,11 +1380,43 @@ class KarstDialog(QDialog):
         self._f_departement.clear()
         self._f_code_insee.clear()
         self._f_code_dept.clear()
+        self._f_altitude.clear()
         self._photo_paths.clear()
         self._photo_list.clear()
 
+    def _write_export(self, layer, csv_path):
+        """Écrit la couche en CSV dans csv_path et copie les photos dans des
+        sous-dossiers <référence>/ à côté. Résout les chemins relatifs depuis le
+        dossier de la couche."""
+        layer_dir = self._layer_dir(layer)
+        out_dir = os.path.dirname(csv_path)
+        fields = [f.name() for f in layer.fields()]
+        with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields)
+            writer.writeheader()
+            for feat in layer.getFeatures():
+                row = {f: feat[f] for f in fields}
+                if row.get("photos"):
+                    ref = str(row.get("reference") or "no_ref")
+                    copied = []
+                    for raw in str(row["photos"]).split(";"):
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        src = raw if os.path.isabs(raw) else \
+                            os.path.join(layer_dir or "", *raw.split("/"))
+                        if os.path.isfile(src):
+                            dest = os.path.join(out_dir, ref)
+                            os.makedirs(dest, exist_ok=True)
+                            shutil.copy2(src, os.path.join(dest, os.path.basename(src)))
+                            copied.append(f"{ref}/{os.path.basename(src)}")
+                        else:
+                            copied.append(raw)  # introuvable : on garde le jeton
+                    row["photos"] = ";".join(copied)
+                writer.writerow(row)
+
     def _export_csv(self):
-        layer = self._resolve_cavites_layer()
+        layer = self._selected_export_layer()
         if layer is None or layer.featureCount() == 0:
             QMessageBox.information(self, "Vide",
                                     "Aucune donnée à exporter.\n"
@@ -1156,33 +1429,121 @@ class KarstDialog(QDialog):
         )
         if not path:
             return
-
-        export_dir = os.path.dirname(path)
-        fields = [f.name() for f in layer.fields()]
-
-        with open(path, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fields)
-            writer.writeheader()
-            for feat in layer.getFeatures():
-                row = {f: feat[f] for f in fields}
-                # Copy photos stored as paths if they exist on disk
-                if row.get("photos"):
-                    ref = row.get("reference", "no_ref")
-                    copied = []
-                    for src in row["photos"].split(";"):
-                        src = src.strip()
-                        if src and os.path.isfile(src):
-                            dest_folder = os.path.join(export_dir, ref)
-                            os.makedirs(dest_folder, exist_ok=True)
-                            dst = os.path.join(dest_folder, os.path.basename(src))
-                            shutil.copy2(src, dst)
-                            copied.append(os.path.join(ref, os.path.basename(src)))
-                    row["photos"] = ";".join(copied)
-                writer.writerow(row)
-
+        self._write_export(layer, path)
         QMessageBox.information(self, "Export réussi",
                                 f"CSV sauvegardé :\n{path}\n\n"
                                 f"Photos copiées dans les sous-dossiers <référence>/.")
+
+    def _export_zip(self):
+        """Exporte CSV + photos dans une archive ZIP unique (portable)."""
+        layer = self._selected_export_layer()
+        if layer is None or layer.featureCount() == 0:
+            QMessageBox.information(self, "Vide", "Aucune donnée à exporter.")
+            return
+        self._new_layer_id = layer.id()
+        zip_path, _ = QFileDialog.getSaveFileName(
+            self, "Exporter en ZIP", "", "Archive ZIP (*.zip)")
+        if not zip_path:
+            return
+        if not zip_path.lower().endswith(".zip"):
+            zip_path += ".zip"
+        import tempfile
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                csv_path = os.path.join(tmp, f"{layer.name()}.csv")
+                self._write_export(layer, csv_path)
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for root, _dirs, files in os.walk(tmp):
+                        for fn in files:
+                            full = os.path.join(root, fn)
+                            zf.write(full, os.path.relpath(full, tmp))
+        except OSError as exc:
+            QMessageBox.warning(self, "Erreur", f"Écriture impossible :\n{exc}")
+            return
+        QMessageBox.information(self, "Export réussi",
+                                f"Archive ZIP (CSV + photos) sauvegardée :\n{zip_path}")
+
+    @staticmethod
+    def _gpx_document(waypoints):
+        """Construit un document GPX (chaîne XML) depuis une liste de waypoints.
+
+        waypoints : liste de dicts {lat, lon, name, desc?, ele?} en WGS84.
+        Fonction pure → testable sans QGIS.
+        """
+        from xml.sax.saxutils import escape
+
+        def esc(v):
+            return escape(str(v)) if v is not None else ""
+
+        lines = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<gpx version="1.1" creator="Karst Entry" '
+            'xmlns="http://www.topografix.com/GPX/1/1">',
+        ]
+        for wp in waypoints:
+            lat, lon = wp.get("lat"), wp.get("lon")
+            if lat is None or lon is None:
+                continue
+            lines.append(f'  <wpt lat="{lat:.8f}" lon="{lon:.8f}">')
+            if wp.get("ele") is not None:
+                lines.append(f"    <ele>{wp['ele']}</ele>")
+            if wp.get("name"):
+                lines.append(f"    <name>{esc(wp['name'])}</name>")
+            if wp.get("desc"):
+                lines.append(f"    <desc>{esc(wp['desc'])}</desc>")
+            lines.append("  </wpt>")
+        lines.append("</gpx>")
+        return "\n".join(lines) + "\n"
+
+    def _export_gpx(self):
+        """Exporte les cavités en waypoints GPX (WGS84)."""
+        layer = self._selected_export_layer()
+        if layer is None or layer.featureCount() == 0:
+            QMessageBox.information(self, "Vide",
+                                    "Aucune donnée à exporter.\n"
+                                    "Utilisez d'abord « Ajouter dans QGIS ».")
+            return
+        self._new_layer_id = layer.id()
+
+        path, _ = QFileDialog.getSaveFileName(self, "Exporter en GPX", "", "GPX (*.gpx)")
+        if not path:
+            return
+        if not path.lower().endswith(".gpx"):
+            path += ".gpx"
+
+        fields = [f.name() for f in layer.fields()]
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+        tr = None
+        if layer.crs() != wgs84:
+            tr = QgsCoordinateTransform(layer.crs(), wgs84, QgsProject.instance())
+
+        waypoints = []
+        for feat in layer.getFeatures():
+            geom = feat.geometry()
+            if not geom or geom.isEmpty():
+                continue
+            pt = geom.asPoint()
+            if tr is not None:
+                pt = tr.transform(pt)
+            name = ""
+            if "reference" in fields and feat["reference"]:
+                name = str(feat["reference"])
+            if "name" in fields and feat["name"]:
+                name = f"{name} — {feat['name']}" if name else str(feat["name"])
+            desc_parts = [str(feat[f]) for f in ("type", "commune")
+                          if f in fields and feat[f]]
+            ele = feat["altitude"] if "altitude" in fields and feat["altitude"] else None
+            waypoints.append({"lat": pt.y(), "lon": pt.x(), "name": name,
+                              "desc": " — ".join(desc_parts), "ele": ele})
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self._gpx_document(waypoints))
+        except OSError as exc:
+            QMessageBox.warning(self, "Erreur", f"Écriture impossible :\n{exc}")
+            return
+        QMessageBox.information(self, "Export réussi",
+                                f"{len(waypoints)} waypoint(s) GPX sauvegardé(s) :\n{path}")
 
     def _add_layer_to_qgis(self):
         layer = self._resolve_cavites_layer()
@@ -1425,7 +1786,7 @@ class KarstDialog(QDialog):
             title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
-        version = QLabel("Version 1.0  —  Plugin QGIS de saisie de phénomènes karstiques")
+        version = QLabel("Version 1.1  —  Plugin QGIS de saisie de phénomènes karstiques")
         version.setStyleSheet("color: white;")
         layout.addWidget(version)
 
@@ -1620,13 +1981,7 @@ class KarstDialog(QDialog):
             return None
         return QgsProject.instance().mapLayer(layer_id)
 
-    @staticmethod
-    def _is_blank(val):
-        """True si une valeur d'attribut est vide : None, chaîne vide, ou NULL QGIS."""
-        if val is None:
-            return True
-        s = str(val).strip()
-        return s == "" or s.upper() == "NULL"
+    _is_blank = staticmethod(feature_utils.is_blank)
 
     def _fiche_show(self):
         # Clear previous content
@@ -1836,6 +2191,24 @@ class KarstDialog(QDialog):
 
         layout.addWidget(scroll)
 
+        # Couche de destination (optionnel) — par défaut « Inventaire Traçages ».
+        tdest_group = QGroupBox("Couche de destination (optionnel)")
+        tdest_layout = QHBoxLayout(tdest_group)
+        tdest_layout.addWidget(QLabel("Couche :"))
+        self._tr_target_combo = QComboBox()
+        self._tr_target_combo.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
+        self._tr_target_combo.currentIndexChanged.connect(self._tr_target_changed)
+        tdest_layout.addWidget(self._tr_target_combo, 1)
+        btn_tdest_refresh = QPushButton("↻")
+        btn_tdest_refresh.setFixedWidth(32)
+        btn_tdest_refresh.clicked.connect(self._populate_tr_targets)
+        tdest_layout.addWidget(btn_tdest_refresh)
+        self._tr_name_edit = QLineEdit()
+        self._tr_name_edit.setPlaceholderText("nom de la nouvelle couche")
+        self._tr_name_edit.setText(self._TRACAGES_LAYER_NAME)
+        tdest_layout.addWidget(self._tr_name_edit, 1)
+        layout.addWidget(tdest_group)
+
         # Compteur file d'attente traçages
         self._tr_lbl_queue = QLabel("File d'attente : 0 traçage(s)")
         self._tr_lbl_queue.setStyleSheet("font-weight: bold; color: #27ae60;")
@@ -1860,7 +2233,52 @@ class KarstDialog(QDialog):
         # Peupler les couches au démarrage
         self._tr_refresh_src()
         self._tr_refresh_dst()
+        self._populate_tr_targets()
         return tab
+
+    def _populate_tr_targets(self):
+        """Peuple le sélecteur de couche cible des traçages (lignes)."""
+        combo = self._tr_target_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("➕ Nouvelle couche", "__new__")
+        default_index = 0
+        for layer in QgsProject.instance().mapLayers().values():
+            if not (hasattr(layer, "getFeatures") and hasattr(layer, "fields")):
+                continue
+            try:
+                if not layer.isValid() or layer.geometryType() != QgsWkbTypes.LineGeometry:
+                    continue
+                name, lid = layer.name(), layer.id()
+            except (AttributeError, RuntimeError):
+                continue
+            combo.addItem(name, lid)
+            if name == self._TRACAGES_LAYER_NAME:
+                default_index = combo.count() - 1
+        combo.setCurrentIndex(default_index)
+        combo.blockSignals(False)
+        self._tr_target_changed()
+
+    def _tr_target_changed(self):
+        is_new = self._tr_target_combo.currentData() == "__new__"
+        self._tr_name_edit.setEnabled(is_new)
+
+    def _target_tracages_layer(self):
+        """Couche cible des traçages selon le sélecteur (existante validée ou nouvelle)."""
+        data = self._tr_target_combo.currentData() \
+            if hasattr(self, "_tr_target_combo") else "__new__"
+        if data and data != "__new__":
+            layer = QgsProject.instance().mapLayer(data)
+            if layer is None:
+                QMessageBox.warning(self, "Couche introuvable",
+                                    "La couche choisie n'existe plus.")
+                return None
+            if not self._ensure_layer_schema(layer, "tracages"):
+                return None
+            return layer
+        name = (self._tr_name_edit.text().strip()
+                if hasattr(self, "_tr_name_edit") else "") or self._TRACAGES_LAYER_NAME
+        return self._create_persistent_tracages_layer(name)
 
     # Wrappers par côté (source / destination) pour router les signaux.
     def _tr_refresh_src(self):
@@ -2065,27 +2483,28 @@ class KarstDialog(QDialog):
         self._tracage_layer_id = candidates[0].id()
         return candidates[0]
 
-    def _create_persistent_tracages_layer(self):
+    def _create_persistent_tracages_layer(self, name=None):
         """Crée une couche traçages PERSISTANTE (GeoPackage sur disque), pas en mémoire."""
+        name = name or self._TRACAGES_LAYER_NAME
         proj_dir = QgsProject.instance().absolutePath()
         if proj_dir:
-            path = os.path.join(proj_dir, f"{self._TRACAGES_LAYER_NAME}.gpkg")
+            path = os.path.join(proj_dir, f"{name}.gpkg")
         else:
             path, _ = QFileDialog.getSaveFileName(
                 self, "Enregistrer la couche traçages",
-                f"{self._TRACAGES_LAYER_NAME}.gpkg", "GeoPackage (*.gpkg)")
+                f"{name}.gpkg", "GeoPackage (*.gpkg)")
             if not path:
                 return None
 
-        if not os.path.isfile(path):
+        created = not os.path.isfile(path)
+        if created:
             proj_crs = self.canvas.mapSettings().destinationCrs()
-            mem = QgsVectorLayer(f"LineString?crs={proj_crs.authid()}",
-                                 self._TRACAGES_LAYER_NAME, "memory")
+            mem = QgsVectorLayer(f"LineString?crs={proj_crs.authid()}", name, "memory")
             mem.dataProvider().addAttributes(self._tracages_field_defs())
             mem.updateFields()
             options = QgsVectorFileWriter.SaveVectorOptions()
             options.driverName = "GPKG"
-            options.layerName = self._TRACAGES_LAYER_NAME
+            options.layerName = name
             ctx = QgsProject.instance().transformContext()
             try:
                 res = QgsVectorFileWriter.writeAsVectorFormatV3(mem, path, ctx, options)
@@ -2096,11 +2515,13 @@ class KarstDialog(QDialog):
                                     f"Impossible de créer le GeoPackage :\n{res[1]}")
                 return None
 
-        layer = QgsVectorLayer(path, self._TRACAGES_LAYER_NAME, "ogr")
+        layer = QgsVectorLayer(path, name, "ogr")
         if not layer.isValid():
             QMessageBox.warning(self, "Couche invalide",
                                 f"Le GeoPackage créé est illisible :\n{path}")
             return None
+        if created:
+            self._apply_tracages_style(layer)
         QgsProject.instance().addMapLayer(layer)
         return layer
 
@@ -2109,11 +2530,9 @@ class KarstDialog(QDialog):
         if not self._tracage_queue:
             return
 
-        layer = self._resolve_tracages_layer()
+        layer = self._target_tracages_layer()
         if layer is None:
-            layer = self._create_persistent_tracages_layer()
-        if layer is None:
-            return  # création annulée par l'utilisateur
+            return  # annulé / couche refusée
         self._tracage_layer_id = layer.id()
         pr    = layer.dataProvider()
         added = 0
@@ -2310,6 +2729,289 @@ class KarstDialog(QDialog):
             f"✓ {created} vue(s) générée(s) dans le groupe « {group_name} ». "
             f"Elles reflètent la couche source en direct.")
 
+    # ------------------------------------------------------------------ Stats tab --
+
+    def _build_stats_tab(self):
+        """Onglet Stats : agrégats par commune (nombre, types, développement)."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        intro = QLabel("Statistiques de l'inventaire, regroupées par commune.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        layer_row = QHBoxLayout()
+        layer_row.addWidget(QLabel("Couche :"))
+        self._stats_layer_combo = QComboBox()
+        self._stats_layer_combo.setSizePolicy(_SizePolicyExpanding, _SizePolicyPreferred)
+        self._stats_layer_combo.currentIndexChanged.connect(self._stats_refresh)
+        layer_row.addWidget(self._stats_layer_combo)
+        btn_refresh = QPushButton("↻")
+        btn_refresh.setFixedWidth(32)
+        btn_refresh.clicked.connect(self._stats_populate_layers)
+        layer_row.addWidget(btn_refresh)
+        layout.addLayout(layer_row)
+
+        self._stats_table = QTableWidget()
+        self._stats_table.setEditTriggers(_NoEditTriggers)
+        self._stats_table.setAlternatingRowColors(True)
+        self._stats_table.horizontalHeader().setSectionResizeMode(_HeaderStretch)
+        layout.addWidget(self._stats_table)
+
+        self._stats_summary = QLabel("")
+        self._stats_summary.setStyleSheet("font-weight: bold;")
+        layout.addWidget(self._stats_summary)
+
+        btn_export = QPushButton("📤 Exporter le récapitulatif (CSV)")
+        btn_export.clicked.connect(self._stats_export_csv)
+        layout.addWidget(btn_export)
+
+        self._stats_fill_btn = QPushButton("🏛 Remplir les communes manquantes")
+        self._stats_fill_btn.setToolTip(
+            "Géocode (geo.api.gouv.fr) les entités sans commune et remplit "
+            "commune / code postal / département. Asynchrone, ne touche que les "
+            "champs vides.")
+        self._stats_fill_btn.clicked.connect(self._stats_fill_communes)
+        layout.addWidget(self._stats_fill_btn)
+
+        self._stats_populate_layers()
+        return tab
+
+    _ADMIN_FIELDS = ("commune", "code_insee", "code_postal",
+                     "departement", "code_dept")
+
+    def _stats_fill_communes(self):
+        """Géocode par lot les entités de la couche dont la commune est vide."""
+        if getattr(self, "_geofill_busy", False):
+            return
+        layer = self._stats_current_layer()
+        if layer is None:
+            return
+        fields = layer.fields().names()
+        if "commune" not in fields:
+            QMessageBox.warning(self, "Champ absent",
+                                "Cette couche n'a pas de champ « commune ».")
+            return
+        # Colonnes administratives manquantes : proposer de les ajouter.
+        missing = [QgsField(n, QVariant.String)
+                   for n in self._ADMIN_FIELDS if n not in fields]
+        if missing:
+            names = ", ".join(f.name() for f in missing)
+            if QMessageBox.question(
+                    self, "Colonnes manquantes",
+                    f"Pour stocker la localisation, ajouter : {names} ?",
+                    _MsgYes | _MsgNo, _MsgYes) != _MsgYes:
+                return
+            try:
+                layer.dataProvider().addAttributes(missing)
+                layer.updateFields()
+            except Exception:
+                QMessageBox.warning(self, "Échec", "Ajout des colonnes impossible.")
+                return
+
+        # Collecte des entités sans commune, reprojetées en WGS84.
+        try:
+            proj_crs = layer.crs()
+            wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+            tr = None
+            if proj_crs != wgs84:
+                tr = QgsCoordinateTransform(proj_crs, wgs84, QgsProject.instance())
+            todo = []
+            for feat in layer.getFeatures():
+                if str(feat["commune"] or "").strip():
+                    continue
+                geom = feat.geometry()
+                if not geom or geom.isEmpty():
+                    continue
+                pt = geom.asPoint()
+                if tr is not None:
+                    pt = tr.transform(pt)
+                todo.append((feat.id(), pt.x(), pt.y()))
+        except Exception:
+            QMessageBox.warning(self, "Erreur", "Lecture de la couche impossible.")
+            return
+
+        if not todo:
+            QMessageBox.information(self, "Rien à faire",
+                                   "Toutes les entités ont déjà une commune.")
+            return
+
+        self._geofill_busy = True
+        self._stats_fill_btn.setEnabled(False)
+        layer_id = layer.id()
+
+        def _worker():
+            results = {}
+            filled = failed = 0
+            for i, (fid, lon, lat) in enumerate(todo, 1):
+                info = None
+                for polygons, cached in self._commune_cache:
+                    if self._point_in_polygons(lon, lat, polygons):
+                        info = cached
+                        break
+                if info is None:
+                    res = self._reverse_geocode(lat, lon)
+                    if res:
+                        polys = self._parse_geojson_polygons(res.pop("_contour", None))
+                        info = res
+                        if polys:
+                            self._commune_cache.append((polys, info))
+                if info:
+                    results[fid] = info
+                    filled += 1
+                else:
+                    failed += 1
+                self._geofill_progress.emit(i, len(todo))
+            try:
+                self._geofill_done.emit(results, filled, failed, layer_id)
+            except RuntimeError:
+                pass  # dialogue fermé
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_geofill_progress(self, done, total):
+        self._stats_summary.setText(f"Géocodage… {done}/{total}")
+
+    @staticmethod
+    def _apply_geofill_results(layer, results, admin_fields):
+        """Écrit les infos admin par fid dans la couche. Retourne le nb appliqué."""
+        idx = {n: layer.fields().indexOf(n) for n in admin_fields}
+        layer.startEditing()
+        applied = 0
+        for fid, info in results.items():
+            for name, col in idx.items():
+                if col != -1:
+                    layer.changeAttributeValue(fid, col, info.get(name, ""))
+            applied += 1
+        layer.commitChanges()
+        return applied
+
+    def _on_geofill_done(self, results, filled, failed, layer_id):
+        self._geofill_busy = False
+        self._stats_fill_btn.setEnabled(True)
+        layer = QgsProject.instance().mapLayer(layer_id)
+        if layer is not None and results:
+            try:
+                self._apply_geofill_results(layer, results, self._ADMIN_FIELDS)
+                layer.triggerRepaint()
+            except Exception:
+                QMessageBox.warning(self, "Erreur", "Écriture des communes impossible.")
+        self._stats_refresh()
+        QMessageBox.information(
+            self, "Géocodage terminé",
+            f"{filled} commune(s) renseignée(s)."
+            + (f"\n{failed} non trouvée(s) (hors France / hors ligne)." if failed else ""))
+
+    def _stats_populate_layers(self):
+        self._stats_layer_combo.blockSignals(True)
+        self._stats_layer_combo.clear()
+        for layer in QgsProject.instance().mapLayers().values():
+            if not (hasattr(layer, "getFeatures") and hasattr(layer, "fields")):
+                continue
+            try:
+                if layer.geometryType() != QgsWkbTypes.PointGeometry:
+                    continue
+                self._stats_layer_combo.addItem(layer.name(), layer.id())
+            except (AttributeError, RuntimeError):
+                continue
+        self._stats_layer_combo.blockSignals(False)
+        self._stats_refresh()
+
+    def _stats_current_layer(self):
+        lid = self._stats_layer_combo.currentData()
+        return QgsProject.instance().mapLayer(lid) if lid else None
+
+    @staticmethod
+    def _compute_commune_stats(entries):
+        """Agrège des entrées en stats par commune.
+
+        entries : itérable de dicts {commune, type, developpement (float|None)}.
+        Retourne une liste triée (nb décroissant, puis commune) de dicts :
+        {commune, count, developpement_total, by_type:{type:count}}.
+        Fonction pure → testable sans QGIS.
+        """
+        acc = {}
+        for e in entries:
+            com = (e.get("commune") or "").strip() or "(non renseignée)"
+            a = acc.setdefault(
+                com, {"commune": com, "count": 0,
+                      "developpement_total": 0.0, "by_type": {}})
+            a["count"] += 1
+            t = (e.get("type") or "").strip() or "(non renseigné)"
+            a["by_type"][t] = a["by_type"].get(t, 0) + 1
+            dev = e.get("developpement")
+            try:
+                if dev not in (None, ""):
+                    a["developpement_total"] += float(dev)
+            except (ValueError, TypeError):
+                pass
+        return sorted(acc.values(), key=lambda r: (-r["count"], r["commune"]))
+
+    def _stats_refresh(self):
+        self._stats_table.clear()
+        self._stats_table.setRowCount(0)
+        self._stats_summary.setText("")
+        layer = self._stats_current_layer()
+        if layer is None:
+            return
+        fields = [f.name() for f in layer.fields()]
+        if "commune" not in fields:
+            self._stats_summary.setText(
+                "Cette couche n'a pas de champ « commune ».")
+            return
+        has_dev = "developpement_estime" in fields
+        has_type = "type" in fields
+        entries = []
+        for feat in layer.getFeatures():
+            entries.append({
+                "commune": feat["commune"] if "commune" in fields else "",
+                "type": feat["type"] if has_type else "",
+                "developpement": feat["developpement_estime"] if has_dev else None,
+            })
+        stats = self._compute_commune_stats(entries)
+        self._stats_rows = stats  # mémorisé pour l'export CSV
+
+        self._stats_table.setColumnCount(4)
+        self._stats_table.setHorizontalHeaderLabels(
+            ["Commune", "Nombre", "Dévelop. cumulé (m)", "Détail par type"])
+        self._stats_table.setRowCount(len(stats))
+        for row, s in enumerate(stats):
+            by_type = ", ".join(f"{t}×{n}" for t, n in
+                                sorted(s["by_type"].items(), key=lambda kv: -kv[1]))
+            dev = f"{s['developpement_total']:.0f}" if has_dev else "—"
+            for col, val in enumerate((s["commune"], str(s["count"]), dev, by_type)):
+                self._stats_table.setItem(row, col, QTableWidgetItem(val))
+
+        total = sum(s["count"] for s in stats)
+        self._stats_summary.setText(
+            f"{total} entité(s) · {len(stats)} commune(s)")
+
+    def _stats_export_csv(self):
+        rows = getattr(self, "_stats_rows", None)
+        if not rows:
+            QMessageBox.information(self, "Vide", "Aucune statistique à exporter.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exporter le récapitulatif", "", "CSV (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["commune", "nombre", "developpement_cumule_m",
+                                 "detail_types"])
+                for s in rows:
+                    by_type = "; ".join(f"{t}x{n}" for t, n in
+                                        sorted(s["by_type"].items(), key=lambda kv: -kv[1]))
+                    writer.writerow([s["commune"], s["count"],
+                                     f"{s['developpement_total']:.0f}", by_type])
+        except OSError as exc:
+            QMessageBox.warning(self, "Erreur", f"Écriture impossible :\n{exc}")
+            return
+        QMessageBox.information(self, "Export réussi", f"Récapitulatif sauvegardé :\n{path}")
+
     # ---------------------------------------------------------------- Import CSV tab --
 
     def _build_import_tab(self):
@@ -2335,12 +3037,13 @@ class KarstDialog(QDialog):
             "Fichier <b>CSV</b> avec une ligne d'en-tête. Séparateur "
             "<code>;</code>, <code>,</code> ou tabulation (détecté automatiquement). "
             "Encodage UTF-8.<br><br>"
-            "<b>Colonnes reconnues</b> (toutes optionnelles ; le mapping par nom "
-            "identique est automatique) :<br>"
-            "• <b>Position</b> : <code>x</code>/<code>X</code>/<code>longitude</code> "
-            "et <code>y</code>/<code>Y</code>/<code>latitude</code><br>"
-            "• <b>Identité</b> : <code>name</code> (nom), <code>type</code>, "
-            "<code>reference</code><br>"
+            "<b>Colonnes reconnues</b> (toutes optionnelles ; mapping automatique "
+            "par synonymes, insensible à la casse/accents/espaces) :<br>"
+            "• <b>Position</b> : <code>x</code>/<code>lon</code>/<code>longitude</code> "
+            "et <code>y</code>/<code>lat</code>/<code>latitude</code> ; "
+            "<code>altitude</code>/<code>alt</code><br>"
+            "• <b>Identité</b> : <code>name</code>/<code>nom</code>, <code>type</code>, "
+            "<code>reference</code>/<code>numero</code><br>"
             "• <b>Dates</b> : <code>date_disc</code>, <code>date_expl</code> "
             "(format <code>AAAA-MM-JJ</code>)<br>"
             "• <b>Détails</b> : <code>prot_id</code>, <code>explorers</code>, "
@@ -2366,10 +3069,20 @@ class KarstDialog(QDialog):
         # Step 2 — Destination
         dest_group = QGroupBox("2. Destination")
         dest_layout = QVBoxLayout(dest_group)
-        self._imp_radio_new      = QRadioButton("Créer une nouvelle couche (mémoire)")
+        self._imp_radio_new      = QRadioButton("Créer une nouvelle couche")
         self._imp_radio_existing = QRadioButton("Importer dans une couche existante")
         self._imp_radio_new.setChecked(True)
         dest_layout.addWidget(self._imp_radio_new)
+
+        # Nom de la nouvelle couche (mode « nouvelle couche »).
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Nom de la couche :"))
+        self._imp_name_edit = QLineEdit()
+        self._imp_name_edit.setText(self._CAVITES_LAYER_NAME)
+        self._imp_name_edit.setPlaceholderText(self._CAVITES_LAYER_NAME)
+        name_row.addWidget(self._imp_name_edit)
+        dest_layout.addLayout(name_row)
+
         dest_layout.addWidget(self._imp_radio_existing)
 
         self._imp_layer_combo = QComboBox()
@@ -2393,6 +3106,7 @@ class KarstDialog(QDialog):
 
         self._imp_radio_new.toggled.connect(
             lambda checked: (self._imp_layer_combo.setEnabled(not checked),
+                             self._imp_name_edit.setEnabled(checked),
                              self._imp_refresh_mapping()))
 
         # Step 3 — Column config (shown after CSV is loaded)
@@ -2451,13 +3165,15 @@ class KarstDialog(QDialog):
             return
         self._imp_path.setText(path)
         try:
+            enc = self._detect_encoding(path)
             delim = self._detect_delimiter(path)
-            with open(path, newline="", encoding="utf-8-sig") as fh:
+            with open(path, newline="", encoding=enc) as fh:
                 reader = csv.DictReader(fh, delimiter=delim)
                 sample_rows = [row for _, row in zip(range(5), reader)]
                 headers = list(sample_rows[0].keys()) if sample_rows else []
             self._imp_csv_headers = [h.strip() for h in headers]
             self._imp_delimiter = delim
+            self._imp_encoding = enc
 
             # Détection automatique du CRS
             detected = self._detect_crs(sample_rows)
@@ -2466,8 +3182,13 @@ class KarstDialog(QDialog):
 
             self._imp_ref_combo.clear()
             self._imp_ref_combo.addItems(self._imp_csv_headers)
-            if "reference" in self._imp_csv_headers:
-                self._imp_ref_combo.setCurrentText("reference")
+            # Devine la colonne « référence » (reference, numero, id, code…).
+            ref_guess = next(
+                (h for h in self._imp_csv_headers
+                 if feature_utils.guess_dest_field(h, ["reference"]) == "reference"),
+                None)
+            if ref_guess:
+                self._imp_ref_combo.setCurrentText(ref_guess)
             self._imp_refresh_mapping()
             self._imp_config_group.setVisible(True)
             sep_label = {";": "point-virgule", ",": "virgule", "\t": "tabulation"}.get(delim, delim)
@@ -2500,9 +3221,11 @@ class KarstDialog(QDialog):
             combo = QComboBox()
             combo.addItem("— ignorer —")
             combo.addItems(dest_fields)
-            # Auto-match by name
-            if src_col in dest_fields:
-                combo.setCurrentText(src_col)
+            # Auto-match universel : casse/accents/espaces ignorés + synonymes
+            # (numero→reference, nom→name, lon→x, alt→altitude…).
+            guess = feature_utils.guess_dest_field(src_col, dest_fields)
+            if guess:
+                combo.setCurrentText(guess)
             self._imp_mapping_table.setCellWidget(row, 1, combo)
 
         self._imp_layer_combo.currentIndexChanged.connect(
@@ -2599,8 +3322,11 @@ class KarstDialog(QDialog):
 
         try:
             delim = getattr(self, "_imp_delimiter", None) or self._detect_delimiter(path)
-            with open(path, newline="", encoding="utf-8-sig") as fh:
-                rows = list(csv.DictReader(fh, delimiter=delim))
+            enc = getattr(self, "_imp_encoding", None) or self._detect_encoding(path)
+            with open(path, newline="", encoding=enc) as fh:
+                rows = [{(k.strip() if isinstance(k, str) else k): v
+                         for k, v in r.items()}
+                        for r in csv.DictReader(fh, delimiter=delim)]
         except Exception as e:
             QMessageBox.warning(self, "Erreur lecture", str(e))
             return
@@ -2686,18 +3412,8 @@ class KarstDialog(QDialog):
     # 2 mètres pour une couche projetée, ~0.00002° pour WGS84 (≈ 2 m).
     _COORD_TOLERANCE = 2.0
 
-    @staticmethod
-    def _norm_name(val):
-        """Normalise un nom pour la comparaison : strip + minuscules."""
-        return str(val).strip().lower() if val else ""
-
-    @staticmethod
-    def _coords_close(x1, y1, x2, y2, tol):
-        """True si les deux points sont à moins de tol unités l'un de l'autre
-        (distance planaire, dans les unités du CRS des coordonnées)."""
-        if None in (x1, y1, x2, y2):
-            return False
-        return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 < tol
+    _norm_name = staticmethod(feature_utils.norm_name)
+    _coords_close = staticmethod(feature_utils.coords_close)
 
     def _metric_distance_fn(self, crs):
         """Retourne f(x1,y1,x2,y2) -> mètres pour des coordonnées dans `crs`.
@@ -2720,75 +3436,53 @@ class KarstDialog(QDialog):
             return None
 
     def _is_duplicate(self, src_ref, src_name, src_x, src_y, existing, dist=None):
+        """Délègue à feature_utils.is_duplicate avec la tolérance du plugin.
+
+        src_(x,y) et existing[].(x,y) doivent être dans le MÊME CRS. Si `dist`
+        (f(x1,y1,x2,y2)->m) est fourni, la tolérance est en mètres.
         """
-        existing : liste de dicts {ref, name, x, y} déjà dans la couche.
-        dist     : optionnel, f(x1,y1,x2,y2) -> mètres. Si fourni, la tolérance
-                   (_COORD_TOLERANCE = 2 m) est interprétée en mètres ; sinon
-                   comparaison planaire dans les unités du CRS (repli historique).
+        return feature_utils.is_duplicate(
+            src_ref, src_name, src_x, src_y, existing,
+            self._COORD_TOLERANCE, dist)
 
-        IMPORTANT : src_(x,y) et existing[].(x,y) doivent être dans le MÊME CRS.
+    _extract_xy = staticmethod(feature_utils.extract_xy)
 
-        Règle 1 — référence non vide :
-          Cherche la même référence. Si trouvée, compare name+coords.
-          Identiques → doublon. Différents → entrée distincte (import).
+    def _save_memory_layer_as_gpkg(self, mem, path, name):
+        """Écrit une couche mémoire dans un GeoPackage sur disque et la recharge.
 
-        Règle 2 — référence vide :
-          Compare name (insensible à la casse) + coords (tolérance 2 m).
-          Match complet → doublon.
+        Retourne la couche ogr chargée, ou None en cas d'échec.
         """
-        tol = self._COORD_TOLERANCE
-        norm_src = self._norm_name(src_name)
-
-        def close(x1, y1, x2, y2):
-            if None in (x1, y1, x2, y2):
-                return False
-            if dist is not None:
-                return dist(x1, y1, x2, y2) < tol
-            return self._coords_close(x1, y1, x2, y2, tol)
-
-        if src_ref:
-            for e in existing:
-                if e["ref"] == src_ref:
-                    same_name = self._norm_name(e["name"]) == norm_src
-                    if e["x"] is not None and src_x is not None:
-                        same_pos = close(src_x, src_y, e["x"], e["y"])
-                    else:
-                        same_pos = (e["x"] is None and src_x is None)
-                    return same_name and same_pos
-            return False
-
-        # Pas de référence → comparaison name + position
-        for e in existing:
-            same_name = self._norm_name(e["name"]) == norm_src and norm_src != ""
-            if e["x"] is not None and src_x is not None:
-                same_pos = close(src_x, src_y, e["x"], e["y"])
-            else:
-                same_pos = (e["x"] is None and src_x is None)
-            if same_name and same_pos:
-                return True
-        return False
-
-    @staticmethod
-    def _extract_xy(row):
-        """Lit x/y depuis un dict CSV en testant plusieurs noms de colonnes."""
-        def _f(val):
-            try:
-                return float(val) if val not in (None, "") else None
-            except (ValueError, TypeError):
-                return None
-        x = _f(row.get("x") or row.get("X") or row.get("longitude") or row.get("Longitude"))
-        y = _f(row.get("y") or row.get("Y") or row.get("latitude") or row.get("Latitude"))
-        return x, y
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "GPKG"
+        options.layerName = name
+        ctx = QgsProject.instance().transformContext()
+        try:
+            res = QgsVectorFileWriter.writeAsVectorFormatV3(mem, path, ctx, options)
+        except AttributeError:
+            res = QgsVectorFileWriter.writeAsVectorFormatV2(mem, path, ctx, options)
+        if res[0] != QgsVectorFileWriter.NoError:
+            QMessageBox.warning(self, "Enregistrement impossible",
+                                f"Impossible d'écrire le GeoPackage :\n{res[1]}")
+            return None
+        layer = QgsVectorLayer(path, name, "ogr")
+        if not layer.isValid():
+            QMessageBox.warning(self, "Couche invalide",
+                                f"Le GeoPackage créé est illisible :\n{path}")
+            return None
+        return layer
 
     def _imp_to_new_layer(self, rows, ref_col, csv_dir=""):
-        """Create a new memory layer from all CSV rows."""
-        # Couche mémoire : pas de dossier sur disque → on ne peut pas stocker de
-        # chemins relatifs. Repli : chemins absolus pour que les photos s'affichent.
+        """Crée une couche depuis le CSV : mémoire, puis persistée sur disque
+        (GeoPackage) si l'utilisateur choisit un emplacement."""
+        # Photos en chemins absolus (résolus depuis le dossier du CSV) : valables
+        # que la couche finisse en mémoire ou sur disque.
         if csv_dir and any(r.get("photos") for r in rows):
             self._absolutize_photos(rows, csv_dir)
         src_crs_id = getattr(self, "_imp_crs_id", None) \
             or self.canvas.mapSettings().destinationCrs().authid()
-        layer = QgsVectorLayer(f"Point?crs={src_crs_id}", "Inventaire Cavités", "memory")
+        layer_name = (self._imp_name_edit.text().strip()
+                      if hasattr(self, "_imp_name_edit") else "") or self._CAVITES_LAYER_NAME
+        layer = QgsVectorLayer(f"Point?crs={src_crs_id}", layer_name, "memory")
         pr = layer.dataProvider()
         for col in self._imp_csv_headers:
             pr.addAttributes([QgsField(col, QVariant.String)])
@@ -2826,11 +3520,35 @@ class KarstDialog(QDialog):
             added += 1
 
         layer.updateExtents()
+
+        # Persistance sur disque : proposer un emplacement (pré-rempli dans le
+        # dossier du projet s'il est enregistré). Annuler = couche en mémoire.
+        proj_dir = QgsProject.instance().absolutePath()
+        default = os.path.join(proj_dir, f"{layer_name}.gpkg") if proj_dir \
+            else f"{layer_name}.gpkg"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Enregistrer la nouvelle couche (Annuler = mémoire)",
+            default, "GeoPackage (*.gpkg)")
+        persisted = False
+        if path:
+            if not path.lower().endswith(".gpkg"):
+                path += ".gpkg"
+            saved = self._save_memory_layer_as_gpkg(layer, path, layer_name)
+            if saved is not None:
+                layer = saved
+                persisted = True
+
+        # Symbologie auto si la couche a un champ « type » (catégorisation).
+        if "type" in self._imp_csv_headers:
+            self._apply_cavites_style(layer)
         QgsProject.instance().addMapLayer(layer)
+        where = f"\nEnregistrée : {path}" if persisted else \
+            "\n⚠ Couche en mémoire (non enregistrée sur disque)."
         QMessageBox.information(
             self, "Import terminé",
-            f"{added} entité(s) importée(s) dans une nouvelle couche.\n"
-            + (f"{skipped} doublon(s) ignoré(s)." if skipped else "")
+            f"{added} entité(s) importée(s) dans « {layer_name} »."
+            + (f"\n{skipped} doublon(s) ignoré(s)." if skipped else "")
+            + where
         )
 
     def _imp_to_existing_layer(self, rows, ref_col, csv_dir=""):
@@ -2847,6 +3565,11 @@ class KarstDialog(QDialog):
                 QMessageBox.warning(self, "Couche introuvable",
                                     "La couche sélectionnée est introuvable.")
                 return
+
+        # Vérifier que la couche choisie correspond au schéma cavités attendu
+        # (géométrie + champs ; migration proposée si des colonnes manquent).
+        if not self._ensure_layer_schema(layer, "cavites"):
+            return
 
         # Photos : si la couche est sur disque, on copie les images à côté et on
         # stocke des chemins relatifs (portables). Sinon (mémoire), repli absolu.
@@ -2985,13 +3708,31 @@ class KarstDialog(QDialog):
         dlg = QgsProjectionSelectionDialog(self)
         if self._imp_crs_id:
             dlg.setCrs(QgsCoordinateReferenceSystem(self._imp_crs_id))
-        if dlg.exec_():
+        if dlg.exec():
             self._imp_set_crs(dlg.crs().authid())
+
+    @staticmethod
+    def _detect_encoding(path):
+        """Devine l'encodage d'un CSV : UTF-8 (avec/sans BOM) sinon Windows-1252.
+
+        Beaucoup de CSV produits sous Windows/Excel (FR) sont en cp1252/latin-1
+        (« é » = 0xe9), ce qui fait échouer une lecture utf-8 stricte. latin-1
+        mappe les 256 octets et ne lève jamais : c'est le repli ultime.
+        """
+        for enc in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                with open(path, encoding=enc) as fh:
+                    fh.read()
+                return enc
+            except UnicodeDecodeError:
+                continue
+        return "latin-1"
 
     @staticmethod
     def _detect_delimiter(path):
         """Sniff the CSV delimiter; fall back to semicolon then comma."""
-        with open(path, newline="", encoding="utf-8-sig") as fh:
+        enc = KarstDialog._detect_encoding(path)
+        with open(path, newline="", encoding=enc) as fh:
             sample = fh.read(4096)
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
@@ -3022,15 +3763,19 @@ class KarstDialog(QDialog):
             self._reset_capture()
 
     def _on_point_captured(self, point):
-        """Reçoit le point capturé, met à jour les champs X/Y et restaure l'outil précédent."""
+        """Reçoit le point capturé (CRS du canevas), restaure l'outil précédent."""
+        self._apply_captured_point(point)
+        self._reset_capture()
+        self.raise_()          # remet la fenêtre au premier plan après le clic carte
+        self.activateWindow()
+
+    def _apply_captured_point(self, point):
+        """Enregistre un point (exprimé dans le CRS du canevas) : labels + autofill."""
         self._captured_point = point
         self._captured_crs = self.canvas.mapSettings().destinationCrs()
         self._lbl_x.setText(f"{point.x():.6f}")
         self._lbl_y.setText(f"{point.y():.6f}")
-        self._reset_capture()
         self._autofill_admin(point)
-        self.raise_()          # remet la fenêtre au premier plan après le clic carte
-        self.activateWindow()
 
     def _autofill_admin(self, point):
         """Renseigne commune / code postal / département depuis les coordonnées.
