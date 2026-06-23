@@ -1982,6 +1982,7 @@ class KarstDialog(QDialog):
         return QgsProject.instance().mapLayer(layer_id)
 
     _is_blank = staticmethod(feature_utils.is_blank)
+    _clean_html = staticmethod(feature_utils.clean_html)
 
     def _fiche_show(self):
         # Clear previous content
@@ -3514,7 +3515,10 @@ class KarstDialog(QDialog):
                     row[ref_col] = ref
 
             for col in self._imp_csv_headers:
-                feat.setAttribute(col, row.get(col, ""))
+                val = row.get(col, "")
+                if col == "comment":
+                    val = self._clean_html(val)  # retire le HTML MS Office
+                feat.setAttribute(col, val)
             pr.addFeature(feat)
             existing.append({"ref": ref, "name": name, "x": x, "y": y})
             added += 1
@@ -3651,7 +3655,10 @@ class KarstDialog(QDialog):
 
             for src_col, dst_field in mapping.items():
                 if dst_field in dest_fields:
-                    feat.setAttribute(dst_field, row.get(src_col, ""))
+                    val = row.get(src_col, "")
+                    if dst_field == "comment":
+                        val = self._clean_html(val)  # retire le HTML MS Office
+                    feat.setAttribute(dst_field, val)
             if dest_ref_field and dest_ref_field in dest_fields and not feat[dest_ref_field]:
                 feat.setAttribute(dest_ref_field, ref)
 

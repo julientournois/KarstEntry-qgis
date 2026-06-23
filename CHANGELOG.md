@@ -36,6 +36,9 @@ avec **KarstPro** (`karst_schema.json`, v1.2.0).
   colonnes manquantes proposé) ou **nouvelle couche au nom choisi** (défaut
   « Inventaire Cavités » / « Inventaire Traçages »).
 
+- **Import CSV — nettoyage du commentaire** : le boilerplate HTML/Microsoft
+  Office du champ `comment` (balises, styles `mso-…`, entités `&nbsp;`/`&quot;`)
+  est retiré automatiquement à l'import.
 - **Import CSV — mapping universel** : correspondance automatique des colonnes
   insensible à la casse, aux accents et aux espaces, avec **synonymes**
   (`numero`→`reference`, `nom`→`name`, `lon`/`long`→`x`, `lat`→`y`,

@@ -48,7 +48,7 @@ Copier le dossier `karst_entry/` dans :
 
 ## Documentation
 
-Voir [`KarstEntry_Documentation.pdf`](KarstEntry_Documentation.pdf), également
+Voir [`KarstEntry_Documentation.pdf`](karst_entry/KarstEntry_Documentation.pdf), également
 accessible depuis l'onglet *Info* du plugin.
 
 ## Licence

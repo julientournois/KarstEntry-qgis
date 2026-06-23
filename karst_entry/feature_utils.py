@@ -13,7 +13,32 @@ Le dialogue (karst_dialog) ne garde que de minces délégations.
 """
 from __future__ import annotations
 
+import html as _html
+import re
 import unicodedata
+
+# Balises HTML/MS-Office (et commentaires conditionnels <!...>) à retirer.
+_TAG_RE = re.compile(r"</?[a-zA-Z!][^>]*>", re.DOTALL)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_WS_RE = re.compile(r"\s+")
+
+
+def clean_html(text):
+    """Retire le boilerplate HTML/Microsoft Office d'un texte (champ commentaire).
+
+    Supprime les balises et commentaires HTML, décode les entités (&nbsp;,
+    &quot;, &amp;…) et normalise les espaces. Le texte hors balises est conservé.
+    Tolérant : « h < 5m » (pas une balise) reste intact.
+    """
+    if text is None:
+        return text
+    s = str(text)
+    if "<" not in s and "&" not in s and "mso-" not in s:
+        return s.strip()
+    s = _HTML_COMMENT_RE.sub(" ", s)
+    s = _TAG_RE.sub(" ", s)
+    s = _html.unescape(s)
+    return _WS_RE.sub(" ", s).strip()
 
 
 def fold(text):
