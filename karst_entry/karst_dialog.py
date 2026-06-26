@@ -29,6 +29,7 @@ Configuration
 """
 
 import os
+import re
 import csv
 import json
 import shutil
@@ -807,10 +808,17 @@ class KarstDialog(QDialog):
             self._photo_list.takeItem(self._photo_list.row(item))
 
     @staticmethod
-    def _store_photos_beside_layer(photo_paths, layer_dir, reference):
-        """Copie les photos sous layer_dir/<reference>/ et renvoie les chemins
-        relatifs (« <référence>/<fichier> », séparés par « ; »).
+    def _safe_dirname(name):
+        """Nom de dossier sûr (caractères interdits Windows remplacés par « - »)."""
+        return re.sub(r'[\\/:*?"<>|]', "-", str(name or "")).strip() or "couche"
 
+    @staticmethod
+    def _store_photos_beside_layer(photo_paths, layer_dir, reference, subdir=""):
+        """Copie les photos sous layer_dir/[<subdir>/]<reference>/ et renvoie les
+        chemins relatifs (« [<subdir>/]<référence>/<fichier> », séparés par « ; »).
+
+        - subdir : dossier intermédiaire (nom de la couche) pour ne pas mélanger
+          les photos de plusieurs couches d'un même dossier.
         - layer_dir vide (couche mémoire) → renvoie les chemins absolus tels
           quels (repli non portable, mais affichable).
         - fichier source absent → le token est conservé sans copie.
@@ -819,17 +827,18 @@ class KarstDialog(QDialog):
             return ""
         if not layer_dir:
             return ";".join(p for p in photo_paths if p)
+        rel_base = f"{subdir}/{reference}" if subdir else reference
         out = []
         for src in photo_paths:
             if not src:
                 continue
             if os.path.isfile(src):
                 base = os.path.basename(src)
-                dst = os.path.join(layer_dir, reference, base)
+                dst = os.path.join(layer_dir, *rel_base.split("/"), base)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 if os.path.abspath(src) != os.path.abspath(dst):
                     shutil.copy2(src, dst)
-                out.append(f"{reference}/{base}")
+                out.append(f"{rel_base}/{base}")
             else:
                 out.append(src)
         return ";".join(out)
@@ -1330,11 +1339,11 @@ class KarstDialog(QDialog):
             fid = feat.id()
             ref_idx = layer.fields().indexOf("reference")
             ref = _build_reference(fid, x or 0, y or 0)
-            # Copie des photos à côté de la couche → chemins relatifs portables
-            # (repli absolu si couche mémoire). Nom de dossier = référence.
+            # Copie des photos sous <couche>/<référence>/ → chemins relatifs
+            # portables (repli absolu si couche mémoire).
             photos_idx = layer.fields().indexOf("photos")
             photos_val = self._store_photos_beside_layer(
-                entry["photos"], layer_dir, ref)
+                entry["photos"], layer_dir, ref, self._safe_dirname(layer.name()))
 
             if ref_idx != -1 or photos_idx != -1:
                 layer.startEditing()
@@ -1390,6 +1399,7 @@ class KarstDialog(QDialog):
         dossier de la couche."""
         layer_dir = self._layer_dir(layer)
         out_dir = os.path.dirname(csv_path)
+        sub = self._safe_dirname(layer.name())  # dossier au nom de la couche
         fields = [f.name() for f in layer.fields()]
         with open(csv_path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
@@ -1406,10 +1416,10 @@ class KarstDialog(QDialog):
                         src = raw if os.path.isabs(raw) else \
                             os.path.join(layer_dir or "", *raw.split("/"))
                         if os.path.isfile(src):
-                            dest = os.path.join(out_dir, ref)
+                            dest = os.path.join(out_dir, sub, ref)
                             os.makedirs(dest, exist_ok=True)
                             shutil.copy2(src, os.path.join(dest, os.path.basename(src)))
-                            copied.append(f"{ref}/{os.path.basename(src)}")
+                            copied.append(f"{sub}/{ref}/{os.path.basename(src)}")
                         else:
                             copied.append(raw)  # introuvable : on garde le jeton
                     row["photos"] = ";".join(copied)
@@ -3375,15 +3385,17 @@ class KarstDialog(QDialog):
             row[column] = ";".join(resolved)
 
     @staticmethod
-    def _relativize_photos(rows, csv_dir, layer_dir, ref_col, column="photos"):
+    def _relativize_photos(rows, csv_dir, layer_dir, ref_col, column="photos",
+                           subdir=""):
         """Copie les images à côté de la couche et stocke des chemins relatifs.
 
         Pour chaque photo : la source est résolue (absolue, ou relative au
-        dossier du CSV), puis copiée sous layer_dir/<référence>/<fichier> ;
-        la colonne reçoit le chemin relatif « <référence>/<fichier> » (avec
-        séparateurs « / », portables). Retourne le nombre d'images copiées.
-        Modifie les dicts `rows` en place.
+        dossier du CSV), puis copiée sous layer_dir/[<subdir>/]<référence>/<fichier> ;
+        la colonne reçoit le chemin relatif correspondant (séparateurs « / »).
+        `subdir` = nom de la couche, pour grouper les photos par couche.
+        Retourne le nombre d'images copiées. Modifie les dicts `rows` en place.
         """
+        prefix = (subdir + "/") if subdir else ""
         copied = 0
         for row in rows:
             raw = row.get(column)
@@ -3396,9 +3408,9 @@ class KarstDialog(QDialog):
                 if not p:
                     continue
                 src = p if os.path.isabs(p) else os.path.normpath(os.path.join(csv_dir, p))
-                # Chemin relatif cible : réutilise le relatif existant, sinon <ref>/<base>
-                rel = p if not os.path.isabs(p) else os.path.join(ref, os.path.basename(p))
-                rel = rel.replace("\\", "/")
+                base_rel = (p if not os.path.isabs(p)
+                            else os.path.join(ref, os.path.basename(p))).replace("\\", "/")
+                rel = prefix + base_rel
                 if os.path.isfile(src):
                     dst = os.path.join(layer_dir, *rel.split("/"))
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -3581,8 +3593,9 @@ class KarstDialog(QDialog):
         if csv_dir and any(r.get("photos") for r in rows):
             layer_dir = self._layer_dir(layer)
             if layer_dir:
-                n = self._relativize_photos(rows, csv_dir, layer_dir, ref_col)
-                photo_note = f"\n{n} photo(s) copiée(s) à côté de la couche."
+                n = self._relativize_photos(rows, csv_dir, layer_dir, ref_col,
+                                            subdir=self._safe_dirname(layer.name()))
+                photo_note = f"\n{n} photo(s) copiée(s) dans « {self._safe_dirname(layer.name())}/ »."
             else:
                 self._absolutize_photos(rows, csv_dir)
                 photo_note = ("\n⚠ Couche en mémoire : photos non copiées "

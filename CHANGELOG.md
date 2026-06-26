@@ -71,8 +71,9 @@ karstiques de surface dans QGIS (3.16 → 4.x), sans dépendance externe.
 - Couches **GeoPackage persistantes** sur disque (`Inventaire Cavités`,
   `Inventaire Traçages`), créées et réutilisées automatiquement — les données
   survivent au redémarrage de QGIS.
-- **Photos portables** : copiées à côté du GeoPackage avec des chemins relatifs
-  (couche + photos déplaçables d'un bloc).
+- **Photos portables, rangées par couche** : copiées à côté du GeoPackage avec
+  des chemins relatifs, sous `<nom_couche>/<référence>/` (saisie, import et
+  export) — plusieurs couches d'un même dossier ne mélangent plus leurs photos.
 
 ### Localisation administrative automatique
 - Remplissage **commune / code postal / département** (+ codes INSEE/dépt) à la
