@@ -29,7 +29,6 @@ Configuration
 """
 
 import os
-import re
 import csv
 import json
 import shutil
@@ -807,10 +806,7 @@ class KarstDialog(QDialog):
                 self._photo_paths.remove(path)
             self._photo_list.takeItem(self._photo_list.row(item))
 
-    @staticmethod
-    def _safe_dirname(name):
-        """Nom de dossier sûr (caractères interdits Windows remplacés par « - »)."""
-        return re.sub(r'[\\/:*?"<>|]', "-", str(name or "")).strip() or "couche"
+    _safe_dirname = staticmethod(feature_utils.safe_dirname)
 
     @staticmethod
     def _store_photos_beside_layer(photo_paths, layer_dir, reference, subdir=""):

@@ -41,6 +41,18 @@ def clean_html(text):
     return _WS_RE.sub(" ", s).strip()
 
 
+def safe_dirname(name):
+    """Nom de dossier sûr : sans accents, espaces ni caractères spéciaux.
+
+    « Inventaire Cavités - HM » → « Inventaire_Cavites_HM ». Tout caractère hors
+    [A-Za-z0-9] devient « _ » (replié), les « _ » de bord sont retirés.
+    """
+    s = unicodedata.normalize("NFKD", str(name or ""))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
+    return s or "couche"
+
+
 def fold(text):
     """Normalise pour comparaison : minuscules + suppression des accents.
 
