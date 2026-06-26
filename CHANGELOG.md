@@ -2,7 +2,7 @@
 
 Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
-avec **KarstPro** (`karst_schema.json`, v1.2.0).
+avec **KarstPro** (`karst_schema.json`, v1.3.0).
 
 ## [1.1] — 2026-06-14
 
