@@ -1792,7 +1792,7 @@ class KarstDialog(QDialog):
             title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
-        version = QLabel("Version 1.1  —  Plugin QGIS de saisie de phénomènes karstiques")
+        version = QLabel("Version 1.2  —  Plugin QGIS de saisie de phénomènes karstiques")
         version.setStyleSheet("color: white;")
         layout.addWidget(version)
 

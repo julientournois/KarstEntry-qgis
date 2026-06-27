@@ -4,6 +4,21 @@ Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
 avec **KarstPro** (`karst_schema.json`, v1.3.0).
 
+## [1.2] — 2026-06-27
+
+### Ajouté
+- **Photos rangées par couche** : à la saisie, à l'import et à l'export, les
+  images sont copiées sous `<nom_couche>/<référence>/` — le nom de dossier est
+  assaini (sans accents, espaces ni caractères spéciaux). Plusieurs couches d'un
+  même dossier ne mélangent plus leurs photos.
+- **Import CSV — nettoyage du commentaire** : le boilerplate HTML/Microsoft
+  Office du champ `comment` (balises, styles `mso-…`, entités `&nbsp;`/`&quot;`)
+  est retiré automatiquement à l'import.
+
+### Documentation
+- Guide utilisateur : arborescence type d'un dossier projet illustrée, et
+  schémas des couches présentés sous forme de tableaux (Champ / Type / Description).
+
 ## [1.1] — 2026-06-14
 
 ### Schéma
@@ -36,9 +51,6 @@ avec **KarstPro** (`karst_schema.json`, v1.3.0).
   colonnes manquantes proposé) ou **nouvelle couche au nom choisi** (défaut
   « Inventaire Cavités » / « Inventaire Traçages »).
 
-- **Import CSV — nettoyage du commentaire** : le boilerplate HTML/Microsoft
-  Office du champ `comment` (balises, styles `mso-…`, entités `&nbsp;`/`&quot;`)
-  est retiré automatiquement à l'import.
 - **Import CSV — mapping universel** : correspondance automatique des colonnes
   insensible à la casse, aux accents et aux espaces, avec **synonymes**
   (`numero`→`reference`, `nom`→`name`, `lon`/`long`→`x`, `lat`→`y`,
@@ -71,9 +83,8 @@ karstiques de surface dans QGIS (3.16 → 4.x), sans dépendance externe.
 - Couches **GeoPackage persistantes** sur disque (`Inventaire Cavités`,
   `Inventaire Traçages`), créées et réutilisées automatiquement — les données
   survivent au redémarrage de QGIS.
-- **Photos portables, rangées par couche** : copiées à côté du GeoPackage avec
-  des chemins relatifs, sous `<nom_couche>/<référence>/` (saisie, import et
-  export) — plusieurs couches d'un même dossier ne mélangent plus leurs photos.
+- **Photos portables** : copiées à côté du GeoPackage avec des chemins relatifs
+  (couche + photos déplaçables d'un bloc).
 
 ### Localisation administrative automatique
 - Remplissage **commune / code postal / département** (+ codes INSEE/dépt) à la
