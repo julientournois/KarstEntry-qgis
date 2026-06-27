@@ -4,6 +4,18 @@ Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
 avec **KarstPro** (`karst_schema.json`, v1.3.0).
 
+## [1.3] — 2026-06-27
+
+### Ajouté
+- **Barre de progression** à l'import (nouvelle couche / couche existante) et à
+  l'export (CSV, ZIP, GPX), avec bouton **Annuler** — utile sur les gros
+  inventaires. La fenêtre ne s'affiche que si l'opération dure (> ~0,4 s).
+
+### Corrigé
+- **Export CSV — encodage** : les fichiers sont désormais écrits en UTF-8 **avec
+  BOM** (`utf-8-sig`). Excel sous Windows détecte correctement l'UTF-8 ; fini les
+  caractères parasites type `NÂ°` à la place de `N°`. La réimport reste compatible.
+
 ## [1.2] — 2026-06-27
 
 ### Ajouté

@@ -40,7 +40,7 @@ from qgis.PyQt.QtWidgets import (
     QComboBox, QDateEdit, QPushButton, QTabWidget, QWidget, QMessageBox,
     QFileDialog, QScrollArea, QGroupBox, QSizePolicy, QListWidget,
     QListWidgetItem, QAbstractItemView, QTextEdit, QTableWidget,
-    QTableWidgetItem, QHeaderView, QRadioButton
+    QTableWidgetItem, QHeaderView, QRadioButton, QProgressDialog
 )
 from qgis.PyQt.QtCore import Qt, QDate, QSize, QVariant, pyqtSignal
 from qgis.PyQt.QtGui import QPixmap, QIcon
@@ -1389,7 +1389,24 @@ class KarstDialog(QDialog):
         self._photo_paths.clear()
         self._photo_list.clear()
 
-    def _write_export(self, layer, csv_path):
+    def _make_progress(self, label, total):
+        """Crée une barre de progression modale (s'affiche si l'opération dure).
+
+        `setValue` traite les événements Qt → l'interface reste réactive et le
+        bouton Annuler fonctionne. Ne s'affiche qu'au-delà de ~0,4 s.
+        """
+        dlg = QProgressDialog(label, "Annuler", 0, max(int(total), 1), self)
+        dlg.setWindowTitle("Karst Entry")
+        dlg.setMinimumDuration(400)
+        dlg.setValue(0)
+        return dlg
+
+    @staticmethod
+    def _progress_cancelled(progress):
+        """True seulement si l'utilisateur a cliqué Annuler (robuste aux mocks)."""
+        return progress is not None and progress.wasCanceled() is True
+
+    def _write_export(self, layer, csv_path, progress=None):
         """Écrit la couche en CSV dans csv_path et copie les photos dans des
         sous-dossiers <référence>/ à côté. Résout les chemins relatifs depuis le
         dossier de la couche."""
@@ -1397,10 +1414,16 @@ class KarstDialog(QDialog):
         out_dir = os.path.dirname(csv_path)
         sub = self._safe_dirname(layer.name())  # dossier au nom de la couche
         fields = [f.name() for f in layer.fields()]
-        with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+        # utf-8-sig : BOM pour qu'Excel (Windows) détecte l'UTF-8 et n'affiche
+        # plus de mojibake type "NÂ°" (sinon il lit le CSV en cp1252).
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
             writer.writeheader()
-            for feat in layer.getFeatures():
+            for i, feat in enumerate(layer.getFeatures(), 1):
+                if progress is not None:
+                    progress.setValue(i)
+                    if self._progress_cancelled(progress):
+                        break
                 row = {f: feat[f] for f in fields}
                 if row.get("photos"):
                     ref = str(row.get("reference") or "no_ref")
@@ -1435,7 +1458,14 @@ class KarstDialog(QDialog):
         )
         if not path:
             return
-        self._write_export(layer, path)
+        progress = self._make_progress("Export CSV en cours…", layer.featureCount())
+        try:
+            self._write_export(layer, path, progress)
+        finally:
+            progress.close()
+        if self._progress_cancelled(progress):
+            QMessageBox.information(self, "Export annulé", "Export interrompu.")
+            return
         QMessageBox.information(self, "Export réussi",
                                 f"CSV sauvegardé :\n{path}\n\n"
                                 f"Photos copiées dans les sous-dossiers <référence>/.")
@@ -1454,10 +1484,16 @@ class KarstDialog(QDialog):
         if not zip_path.lower().endswith(".zip"):
             zip_path += ".zip"
         import tempfile
+        progress = self._make_progress("Export ZIP en cours…", layer.featureCount())
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 csv_path = os.path.join(tmp, f"{layer.name()}.csv")
-                self._write_export(layer, csv_path)
+                self._write_export(layer, csv_path, progress)
+                if self._progress_cancelled(progress):
+                    progress.close()
+                    QMessageBox.information(self, "Export annulé", "Export interrompu.")
+                    return
+                progress.setLabelText("Compression de l'archive…")
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                     for root, _dirs, files in os.walk(tmp):
                         for fn in files:
@@ -1466,6 +1502,8 @@ class KarstDialog(QDialog):
         except OSError as exc:
             QMessageBox.warning(self, "Erreur", f"Écriture impossible :\n{exc}")
             return
+        finally:
+            progress.close()
         QMessageBox.information(self, "Export réussi",
                                 f"Archive ZIP (CSV + photos) sauvegardée :\n{zip_path}")
 
@@ -1523,8 +1561,14 @@ class KarstDialog(QDialog):
         if layer.crs() != wgs84:
             tr = QgsCoordinateTransform(layer.crs(), wgs84, QgsProject.instance())
 
+        progress = self._make_progress("Export GPX en cours…", layer.featureCount())
         waypoints = []
-        for feat in layer.getFeatures():
+        cancelled = False
+        for i, feat in enumerate(layer.getFeatures(), 1):
+            progress.setValue(i)
+            if self._progress_cancelled(progress):
+                cancelled = True
+                break
             geom = feat.geometry()
             if not geom or geom.isEmpty():
                 continue
@@ -1541,6 +1585,10 @@ class KarstDialog(QDialog):
             ele = feat["altitude"] if "altitude" in fields and feat["altitude"] else None
             waypoints.append({"lat": pt.y(), "lon": pt.x(), "name": name,
                               "desc": " — ".join(desc_parts), "ele": ele})
+        progress.close()
+        if cancelled:
+            QMessageBox.information(self, "Export annulé", "Export interrompu.")
+            return
 
         try:
             with open(path, "w", encoding="utf-8") as fh:
@@ -1792,7 +1840,7 @@ class KarstDialog(QDialog):
             title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
-        version = QLabel("Version 1.2  —  Plugin QGIS de saisie de phénomènes karstiques")
+        version = QLabel("Version 1.3  —  Plugin QGIS de saisie de phénomènes karstiques")
         version.setStyleSheet("color: white;")
         layout.addWidget(version)
 
@@ -3502,7 +3550,11 @@ class KarstDialog(QDialog):
         # Distance métrique dans le CRS source (les coords comparées y sont).
         dist = self._metric_distance_fn(QgsCoordinateReferenceSystem(src_crs_id))
 
-        for row in rows:
+        progress = self._make_progress("Import en cours…", len(rows))
+        for i, row in enumerate(rows, 1):
+            progress.setValue(i)
+            if self._progress_cancelled(progress):
+                break
             ref  = row.get(ref_col, "").strip()
             name = row.get("name") or row.get("Name") or row.get("nom") or ""
             x, y = self._extract_xy(row)
@@ -3530,6 +3582,7 @@ class KarstDialog(QDialog):
             pr.addFeature(feat)
             existing.append({"ref": ref, "name": name, "x": x, "y": y})
             added += 1
+        progress.close()
 
         layer.updateExtents()
 
@@ -3638,7 +3691,11 @@ class KarstDialog(QDialog):
         # exprimées les coords de `existing` ET les coords source transformées.
         dist = self._metric_distance_fn(dest_crs)
 
-        for row in rows:
+        progress = self._make_progress("Import en cours…", len(rows))
+        for i, row in enumerate(rows, 1):
+            progress.setValue(i)
+            if self._progress_cancelled(progress):
+                break
             ref  = row.get(ref_col, "").strip()
             name = row.get("name") or row.get("Name") or row.get("nom") or ""
             x, y = self._extract_xy(row)
@@ -3675,6 +3732,7 @@ class KarstDialog(QDialog):
             # Coords en CRS dest (dx, dy) pour rester cohérent avec `existing`.
             existing.append({"ref": ref, "name": name, "x": dx, "y": dy})
             added += 1
+        progress.close()
 
         layer.updateExtents()
         layer.triggerRepaint()
