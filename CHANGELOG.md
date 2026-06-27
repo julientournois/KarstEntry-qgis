@@ -4,6 +4,34 @@ Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
 avec **KarstPro** (`karst_schema.json`, v1.3.0).
 
+## [1.4] — 2026-06-27
+
+### Ajouté
+- **Traçages : import / export complet** sans nouveau bouton. L'export sérialise
+  la géométrie ligne en colonne **WKT** ; l'import auto-détecte un CSV de
+  traçages et reconstruit la couche. Le sélecteur « Couche active » liste
+  désormais les couches de points **et** de lignes.
+- **Import : toujours une vraie couche GeoPackage** (plus de couche mémoire
+  volatile) — annuler la boîte d'enregistrement utilise l'emplacement par défaut.
+
+### Performance
+- Import CSV en **lot** (`addFeatures`) au lieu d'entité par entité — nettement
+  plus rapide sur les gros inventaires.
+
+### Corrigé
+- **Roundtrip CSV** : la colonne réservée `fid` (clé primaire GeoPackage) n'est
+  plus exportée et est ignorée à l'import (corrige « wrong field type for fid »
+  et `KeyError: 'fid'`).
+- **Export CSV** : plus de faux « export interrompu », et plus d'erreur de copie
+  quand la photo source est déjà dans le dossier de destination (WinError 32).
+- **Barre de progression** : modale et visible pendant toute la durée de
+  l'opération (imports comme exports), bouton Annuler fonctionnel.
+
+### Interne
+- Refactor : `karst_dialog.py` scindé en modules (`ui_tabs`, `layers`, `schema`,
+  `ui_constants`, `csv_io`). Boucle de tests d'intégration **PyQGIS réelle**
+  (`run_tests.ps1` + smoke).
+
 ## [1.3] — 2026-06-27
 
 ### Ajouté
