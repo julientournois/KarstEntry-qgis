@@ -7,19 +7,13 @@ change. KarstDialog hérite de TabBuildersMixin.
 import os
 
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit,
-    QComboBox, QDateEdit, QPushButton, QTabWidget, QWidget, QMessageBox,
-    QFileDialog, QScrollArea, QGroupBox, QSizePolicy, QListWidget,
-    QListWidgetItem, QAbstractItemView, QTextEdit, QTableWidget,
-    QTableWidgetItem, QHeaderView, QRadioButton, QProgressDialog
+    QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit,
+    QComboBox, QDateEdit, QPushButton, QWidget,
+    QScrollArea, QGroupBox, QListWidget, QTextEdit, QTableWidget,
+    QRadioButton,
 )
-from qgis.PyQt.QtCore import Qt, QDate, QSize, QVariant, pyqtSignal
-from qgis.PyQt.QtGui import QPixmap, QIcon
-from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry, QgsPointXY,
-    QgsField, QgsWkbTypes, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-    QgsDistanceArea, QgsVectorFileWriter,
-)
+from qgis.PyQt.QtCore import QDate, QSize
+from qgis.PyQt.QtGui import QPixmap
 from .ui_constants import *  # noqa: F401,F403  (constantes + compat enums)
 
 
@@ -320,7 +314,7 @@ class TabBuildersMixin:
             title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
-        version = QLabel("Version 1.4  —  Plugin QGIS de saisie de phénomènes karstiques")
+        version = QLabel("Version 1.5  —  Plugin QGIS de saisie de phénomènes karstiques")
         version.setStyleSheet("color: white;")
         layout.addWidget(version)
 

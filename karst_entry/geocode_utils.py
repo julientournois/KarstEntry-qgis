@@ -15,17 +15,22 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.parse
 import urllib.request
 
 
-def reverse_geocode(lat, lon, timeout=3.0):
+def reverse_geocode(lat, lon, timeout=3.0, retries=2, backoff=0.5):
     """Géocodage inverse via geo.api.gouv.fr (point-dans-polygone communal).
 
     Retourne un dict commune/code_insee/code_postal/departement/code_dept,
     plus « _contour » (géométrie GeoJSON de la commune, pour mise en cache),
     ou None en cas d'échec (réseau, hors France, réponse vide). Ne lève
     jamais d'exception.
+
+    Résilience terrain (réseau instable) : en cas d'erreur réseau/timeout, on
+    réessaie `retries` fois avec un délai exponentiel (`backoff`·2ⁿ). Une réponse
+    valide mais vide (point hors France) n'est PAS réessayée — c'est définitif.
     """
     params = urllib.parse.urlencode({
         "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
@@ -33,11 +38,17 @@ def reverse_geocode(lat, lon, timeout=3.0):
         "format": "json", "geometry": "contour",
     })
     url = f"https://geo.api.gouv.fr/communes?{params}"
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
+    data = None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break  # réponse réseau obtenue (même vide) : pas de réessai
+        except Exception:
+            if attempt < retries:
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            return None
     if not data:
         return None
     c = data[0]

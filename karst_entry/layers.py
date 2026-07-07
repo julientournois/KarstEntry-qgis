@@ -7,12 +7,14 @@ Méthodes d'instance (self) regroupées dans LayersMixin, dont hérite KarstDial
 Aucun signal/slot déplacé.
 """
 import os
+import shutil
+import datetime
 
 from qgis.PyQt.QtWidgets import QMessageBox, QFileDialog
 from qgis.PyQt.QtCore import QVariant
 from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsFeature, QgsField, QgsWkbTypes,
-    QgsCoordinateReferenceSystem, QgsDistanceArea, QgsVectorFileWriter,
+    QgsProject, QgsVectorLayer, QgsWkbTypes,
+    QgsDistanceArea, QgsVectorFileWriter,
     QgsCategorizedSymbolRenderer, QgsRendererCategory,
     QgsMarkerSymbol, QgsLineSymbol, QgsPointXY, QgsUnitTypes,
 )
@@ -344,6 +346,41 @@ class LayersMixin:
             return ""
         return os.path.dirname(src) if os.path.isfile(src) else ""
 
+    @staticmethod
+    def _layer_file_path(layer):
+        """Chemin complet du fichier GeoPackage source d'une couche, ou '' si
+        couche mémoire (ou source introuvable sur disque)."""
+        try:
+            src = layer.dataProvider().dataSourceUri().split("|")[0]
+        except (AttributeError, RuntimeError):
+            return ""
+        return src if os.path.isfile(src) else ""
+
+    @staticmethod
+    def _backup_gpkg(path):
+        """Sauvegarde un GeoPackage avant modification, dans le même dossier,
+        avec la date du jour dans le nom (ex. « Inventaire.backup-2026-07-03.gpkg »).
+
+        Une seule sauvegarde par jour est conservée : si un backup du jour
+        existe déjà, on ne l'écrase pas (c'est l'état le plus utile — celui
+        d'avant tout import de la journée). Silencieux en cas d'échec : la
+        sauvegarde est un filet de sécurité, jamais un blocage de l'import.
+        Retourne le chemin du backup, ou None si non applicable/échec.
+        """
+        if not path or not os.path.isfile(path):
+            return None
+        folder = os.path.dirname(path)
+        base, ext = os.path.splitext(os.path.basename(path))
+        date_str = datetime.date.today().isoformat()
+        backup_path = os.path.join(folder, f"{base}.backup-{date_str}{ext}")
+        if os.path.exists(backup_path):
+            return backup_path
+        try:
+            shutil.copy2(path, backup_path)
+        except OSError:
+            return None
+        return backup_path
+
     def _metric_distance_fn(self, crs):
         """Retourne f(x1,y1,x2,y2) -> mètres pour des coordonnées dans `crs`.
 
@@ -387,3 +424,31 @@ class LayersMixin:
                                 f"Le GeoPackage créé est illisible :\n{path}")
             return None
         return layer
+
+    def _persist_new_layer_as_gpkg(self, layer, layer_name, csv_dir, dialog_title):
+        """Propose un emplacement GeoPackage pour une couche mémoire nouvellement
+        importée et l'y enregistre (factorise le import cavités/traçages).
+
+        Emplacement pré-rempli : dossier du projet, sinon celui du CSV importé.
+        Annuler la boîte de dialogue utilise cet emplacement par défaut plutôt
+        que de laisser une couche mémoire volatile (cf. _imp_to_new_layer /
+        _imp_tracages_to_new_layer).
+
+        Retourne (layer, path, persisted) : `layer` est la couche persistée en
+        cas de succès, sinon la couche mémoire d'origine ; `persisted` est
+        False si l'écriture GeoPackage a échoué.
+        """
+        proj_dir = QgsProject.instance().absolutePath() or csv_dir or ""
+        default = os.path.join(proj_dir, f"{layer_name}.gpkg") if proj_dir \
+            else f"{layer_name}.gpkg"
+        path, _ = QFileDialog.getSaveFileName(
+            self, dialog_title, default, "GeoPackage (*.gpkg)")
+        if not path:
+            path = default  # annulation → emplacement par défaut (couche réelle)
+        if not path.lower().endswith(".gpkg"):
+            path += ".gpkg"
+        saved = self._save_memory_layer_as_gpkg(layer, path, layer_name)
+        persisted = saved is not None
+        if persisted:
+            layer = saved
+        return layer, path, persisted

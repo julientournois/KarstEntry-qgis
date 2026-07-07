@@ -36,21 +36,17 @@ import threading
 import zipfile
 
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit,
-    QComboBox, QDateEdit, QPushButton, QTabWidget, QWidget, QMessageBox,
-    QFileDialog, QScrollArea, QGroupBox, QSizePolicy, QListWidget,
-    QListWidgetItem, QAbstractItemView, QTextEdit, QTableWidget,
-    QTableWidgetItem, QHeaderView, QRadioButton, QProgressDialog
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QComboBox, QDateEdit, QTabWidget, QWidget, QMessageBox,
+    QFileDialog, QListWidgetItem, QTableWidgetItem, QProgressDialog
 )
-from qgis.PyQt.QtCore import Qt, QDate, QSize, QVariant, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QDate, QVariant, pyqtSignal
 from qgis.PyQt.QtGui import QPixmap, QIcon
 
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry, QgsPointXY,
     QgsField, QgsWkbTypes, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-    QgsDistanceArea, QgsVectorFileWriter,
-    QgsCategorizedSymbolRenderer, QgsRendererCategory,
-    QgsMarkerSymbol, QgsLineSymbol,
+    QgsDistanceArea,
 )
 try:
     from qgis.core import QgsExifTools  # géotag des photos (QGIS ≥ 3.6)
@@ -62,27 +58,18 @@ from .map_tool import PointCaptureTool
 from . import geocode_utils
 from . import feature_utils
 from . import csv_io
-from .schema import (
-    _SCHEMA, _SCHEMA_PATH, _QVARIANT_BY_TYPE,
-    _FALLBACK_CAVITES_FIELDS, _FALLBACK_TRACAGES_FIELDS,
-    _load_schema, _schema_fields, _qgs_fields,
-)
 from .ui_tabs import TabBuildersMixin
 from .layers import LayersMixin
 
 # Compat enums Qt (PyQt5/6) + constantes de thème : déplacés dans ui_constants
-# pour être partagés avec ui_tabs sans import circulaire.
+# pour être partagés avec ui_tabs sans import circulaire. Le contrat de schéma
+# (schema.py) n'est plus référencé ici directement : seul LayersMixin (layers.py)
+# en a besoin depuis le split _cavites_field_defs/_tracages_field_defs.
 from .ui_constants import (
     _qenum,
-    _WStaysOnTop, _WNoHelpBtn, _AlignTop, _AlignLeft, _AlignCenter,
+    _WStaysOnTop, _AlignTop, _AlignLeft, _AlignCenter,
     _KeepRatio, _Smooth, _TextSelect, _ISODate, _UserRole, _WindowModal,
-    _MsgYes, _MsgNo,
-    _ListIconMode, _ListAdjust, _ExtendedSel, _SelectRows, _NoEditTriggers,
-    _HeaderStretch, _SizePolicyExpanding, _SizePolicyPreferred,
-    KARST_TYPES, _TYPE_COLORS, _TYPE_COLOR_DEFAULT, _TYPE_MARKERS,
-    _TYPE_MARKER_DEFAULT, _TYPE_MARKER_SIZE, _RESULT_COLORS,
-    _RESULT_COLOR_DEFAULT, PHOTO_THUMB_SIZE, _DEFAULT_COLORANTS,
-    _DEFAULT_RESULTATS, _load_config,
+    _MsgYes, _MsgNo, PHOTO_THUMB_SIZE,
 )
 
 def _last3(coord):
@@ -548,9 +535,6 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
 
 
 
-
-
-
     # ---- Symbologie automatique (catégorisée par type / résultat) -----------
 
     @staticmethod
@@ -564,8 +548,6 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
             layer.saveStyleToDatabase(layer.name(), "Style Karst Entry", True, "")
         except Exception:
             pass
-
-
 
     def _offer_schema_upgrade(self, layer, pr):
         """Propose d'ajouter à la couche les colonnes du schéma qui lui manquent.
@@ -1594,9 +1576,6 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
 
     _TRACAGES_LAYER_NAME = "Inventaire Traçages"
 
-
-
-
     def _tr_flush_queue(self):
         """Écrit tous les traçages de la file dans une couche persistante sur disque."""
         if not self._tracage_queue:
@@ -1609,10 +1588,27 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
         pr    = layer.dataProvider()
         added = 0
 
+        # pt_src/pt_dst sont dans le CRS du PROJET (cf. _tr_get_point) : il faut
+        # les reprojeter vers le CRS de la couche cible si celui-ci diffère,
+        # sinon la géométrie est écrite avec les mauvaises unités (mélange
+        # degrés/mètres) et la couche s'affiche vide ou hors champ.
+        proj_crs = self.canvas.mapSettings().destinationCrs()
+        layer_crs = layer.crs()
+        transform = None
+        if layer_crs.isValid() and proj_crs != layer_crs:
+            transform = QgsCoordinateTransform(proj_crs, layer_crs, QgsProject.instance())
+
         for entry in self._tracage_queue:
             feat = QgsFeature(layer.fields())
+            pt_src, pt_dst = entry["pt_src"], entry["pt_dst"]
+            if transform is not None:
+                try:
+                    pt_src = transform.transform(pt_src)
+                    pt_dst = transform.transform(pt_dst)
+                except Exception:
+                    pass
             # Ligne entre les deux points
-            feat.setGeometry(QgsGeometry.fromPolylineXY([entry["pt_src"], entry["pt_dst"]]))
+            feat.setGeometry(QgsGeometry.fromPolylineXY([pt_src, pt_dst]))
             for field in ("point_injection", "point_sortie",
                           "colorant", "resultat", "date_injection", "date_detection",
                           "temps_transit", "distance_m", "operateurs", "commentaire"):
@@ -2234,19 +2230,8 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
         layer.updateExtents()
 
         # Persistance : toujours une vraie couche GeoPackage (cf. _imp_to_new_layer).
-        proj_dir = QgsProject.instance().absolutePath() or csv_dir or ""
-        default = os.path.join(proj_dir, f"{layer_name}.gpkg") if proj_dir \
-            else f"{layer_name}.gpkg"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Enregistrer la couche de traçages", default, "GeoPackage (*.gpkg)")
-        if not path:
-            path = default
-        if not path.lower().endswith(".gpkg"):
-            path += ".gpkg"
-        saved = self._save_memory_layer_as_gpkg(layer, path, layer_name)
-        persisted = saved is not None
-        if persisted:
-            layer = saved
+        layer, path, persisted = self._persist_new_layer_as_gpkg(
+            layer, layer_name, csv_dir, "Enregistrer la couche de traçages")
         self._apply_tracages_style(layer)
         QgsProject.instance().addMapLayer(layer)
         where = f"\nEnregistrée : {path}" if persisted else \
@@ -2407,24 +2392,9 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
         layer.updateExtents()
 
         # Persistance sur disque : l'import produit TOUJOURS une vraie couche
-        # GeoPackage (jamais une couche mémoire volatile). On propose un
-        # emplacement, pré-rempli dans le dossier du projet (ou à côté du CSV) ;
-        # si l'utilisateur annule, on enregistre quand même à cet emplacement
-        # par défaut.
-        proj_dir = QgsProject.instance().absolutePath() or csv_dir or ""
-        default = os.path.join(proj_dir, f"{layer_name}.gpkg") if proj_dir \
-            else f"{layer_name}.gpkg"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Enregistrer la nouvelle couche",
-            default, "GeoPackage (*.gpkg)")
-        if not path:
-            path = default  # annulation → emplacement par défaut (couche réelle)
-        if not path.lower().endswith(".gpkg"):
-            path += ".gpkg"
-        saved = self._save_memory_layer_as_gpkg(layer, path, layer_name)
-        persisted = saved is not None
-        if persisted:
-            layer = saved
+        # GeoPackage (jamais une couche mémoire volatile).
+        layer, path, persisted = self._persist_new_layer_as_gpkg(
+            layer, layer_name, csv_dir, "Enregistrer la nouvelle couche")
 
         # Symbologie auto si la couche a un champ « type » (catégorisation).
         if "type" in self._imp_csv_headers:
@@ -2453,6 +2423,11 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
                 QMessageBox.warning(self, "Couche introuvable",
                                     "La couche sélectionnée est introuvable.")
                 return
+
+        # Sauvegarde du GeoPackage AVANT toute modification (schéma ou import) :
+        # une copie datée du jour dans le même dossier, filet de sécurité en cas
+        # d'import malencontreux. Sans effet sur une couche mémoire.
+        backup_path = self._backup_gpkg(self._layer_file_path(layer))
 
         # Vérifier que la couche choisie correspond au schéma cavités attendu
         # (géométrie + champs ; migration proposée si des colonnes manquent).
@@ -2563,11 +2538,13 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
 
         layer.updateExtents()
         layer.triggerRepaint()
+        backup_note = f"\nSauvegarde avant import : {os.path.basename(backup_path)}" \
+            if backup_path else ""
         QMessageBox.information(
             self, "Import terminé",
             f"{added} entité(s) importée(s) dans « {layer.name()} ».\n"
             + (f"{skipped} doublon(s) ignoré(s)." if skipped else "")
-            + photo_note
+            + photo_note + backup_note
         )
 
     # Délégations vers csv_io (fonctions pures, testables sans QGIS).

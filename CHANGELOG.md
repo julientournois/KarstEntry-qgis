@@ -4,7 +4,38 @@ Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
 avec **KarstPro** (`karst_schema.json`, v1.3.0).
 
+## [1.5] — 2026-07-03
+
+### Ajouté
+- **Sauvegarde automatique avant import sur couche existante** : une copie
+  datée du jour du GeoPackage est créée dans le même dossier avant toute
+  modification (schéma ou import). Une seule sauvegarde conservée par jour
+  (n'écrase pas l'état d'avant le premier import de la journée).
+
+### Interne
+- **Nettoyage du code** : suppression d'imports Qt/QGIS devenus morts après le
+  refactor en mixins (résidus d'une extraction mécanique), factorisation de la
+  logique de persistance GeoPackage à l'import (cavités/traçages) désormais
+  partagée (`_persist_new_layer_as_gpkg`), suppression d'un fichier vide
+  committé par erreur. Aucun changement de comportement fonctionnel.
+- Correction du test de cohérence de schéma et de deux tests d'intégration
+  affectés par le nettoyage.
+
 ## [1.4] — 2026-06-27
+
+### Corrigé
+- **Traçages non affichés** : la géométrie des traçages ajoutés dans une couche
+  dont le CRS diffère de celui du projet n'était pas reprojetée (même classe de
+  bug que la reprojection cavités) — coordonnées écrites dans les mauvaises
+  unités, traçages invisibles ou hors champ. `_tr_flush_queue` reprojette
+  désormais systématiquement vers le CRS de la couche cible.
+- **Résilience du géocodage** : `reverse_geocode` réessaie les erreurs
+  réseau/timeout (backoff exponentiel) avant d'abandonner.
+
+### Interne
+- Test de cohérence du schéma partagé avec KarstPro (verrouille version et
+  champs noyau, compare aux deux copies si trouvables) — évite une divergence
+  silencieuse comme celle déjà rencontrée (`altitude` vs `altitude_m`).
 
 ### Ajouté
 - **Traçages : import / export complet** sans nouveau bouton. L'export sérialise
