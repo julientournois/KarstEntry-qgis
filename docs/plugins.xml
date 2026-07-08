@@ -13,21 +13,21 @@
   besoin de le faire à la main dans Extensions → Paramètres → Dépôts.
 - `metadata.txt` : `homepage`, `repository`, `tracker` renseignés (étaient
   vides depuis toujours).]]></changelog>
-        <create_date>2026-07-08T10:16:23.256292+00:00</create_date>
+        <create_date>2026-07-08T19:22:43.984329+00:00</create_date>
         <deprecated>False</deprecated>
         <description><![CDATA[Plugin de saisie de données pour les phénomènes karstiques de surface]]></description>
-        <download_url>https://github.com/julientournois/KarstEntry-qgis/releases/download/v1.6/karst_entry_1.6_2026-07-08.zip</download_url>
+        <download_url>https://github.com/julientournois/KarstEntry-qgis/releases/download/v1.6/karst_entry.zip</download_url>
         <experimental>False</experimental>
-        <file_name>karst_entry_1.6_2026-07-08.zip</file_name>
+        <file_name>karst_entry.zip</file_name>
         <homepage><![CDATA[https://github.com/julientournois/KarstEntry-qgis]]></homepage>
-        <icon>icon.png</icon>
+        <icon>https://raw.githubusercontent.com/julientournois/KarstEntry-qgis/main/karst_entry/brand/karstentry-pastille-ronde-ocre-clair-512.png</icon>
         <repository><![CDATA[https://github.com/julientournois/KarstEntry]]></repository>
         <qgis_maximum_version>4.99</qgis_maximum_version>
         <qgis_minimum_version>3.16</qgis_minimum_version>
         <server>False</server>
         <tags><![CDATA[karst,speleology,cave,geology,field data]]></tags>
         <tracker><![CDATA[https://github.com/julientournois/KarstEntry/issues]]></tracker>
-        <update_date>2026-07-08T10:16:23.256292+00:00</update_date>
+        <update_date>2026-07-08T19:22:43.984329+00:00</update_date>
         <uploaded_by><![CDATA[Julien Tournois]]></uploaded_by>
         <version>1.6</version>
     </pyqgis_plugin>
