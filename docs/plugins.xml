@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <plugins>
-    <pyqgis_plugin name="Karst Entry" version="1.7">
+    <pyqgis_plugin name="Karst Entry" version="1.7.1">
         <about><![CDATA[Permet la saisie rapide de cavités karstiques via formulaire, sur une couche existante ou une nouvelle couche. Génère une référence unique par entrée.]]></about>
         <author_name><![CDATA[Julien Tournois]]></author_name>
         <changelog><![CDATA[Corrigé :
 - Dépôt QGIS custom (mises à jour automatiques) : installation depuis le dépôt impossible et logo absent, corrigés.]]></changelog>
-        <create_date>2026-07-08T19:31:08.656403+00:00</create_date>
+        <create_date>2026-07-08T19:46:31.105277+00:00</create_date>
         <deprecated>False</deprecated>
         <description><![CDATA[Plugin de saisie de données pour les phénomènes karstiques de surface]]></description>
-        <download_url>https://github.com/julientournois/KarstEntry-qgis/releases/download/v1.7/karst_entry.zip</download_url>
+        <download_url>https://github.com/julientournois/KarstEntry-qgis/releases/download/v1.7.1/karst_entry.zip</download_url>
         <experimental>False</experimental>
         <file_name>karst_entry.zip</file_name>
         <homepage><![CDATA[https://github.com/julientournois/KarstEntry-qgis]]></homepage>
@@ -19,8 +19,8 @@
         <server>False</server>
         <tags><![CDATA[karst,speleology,cave,geology,field data]]></tags>
         <tracker><![CDATA[https://github.com/julientournois/KarstEntry/issues]]></tracker>
-        <update_date>2026-07-08T19:31:08.656403+00:00</update_date>
+        <update_date>2026-07-08T19:46:31.105277+00:00</update_date>
         <uploaded_by><![CDATA[Julien Tournois]]></uploaded_by>
-        <version>1.7</version>
+        <version>1.7.1</version>
     </pyqgis_plugin>
 </plugins>

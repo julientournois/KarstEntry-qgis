@@ -4,6 +4,11 @@ Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
 avec **KarstPro** (`karst_schema.json`, v1.3.0).
 
+## [1.7.1] — 2026-07-08
+
+### Corrigé
+- **Dépôt QGIS custom (mises à jour automatiques)** : installation depuis le dépôt impossible et logo absent, corrigés.
+
 ## [1.7] — 2026-07-08
 
 ### Corrigé
