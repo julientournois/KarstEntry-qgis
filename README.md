@@ -10,7 +10,7 @@ Paquet prêt à l'emploi destiné aux utilisateurs.
 Le code source complet est dans
 [**KarstEntry**](https://github.com/julientournois/KarstEntry).
 
-[![Version](https://img.shields.io/badge/version-1.5-2b6cb0)](https://github.com/julientournois/KarstEntry/releases)
+[![Version](https://img.shields.io/badge/version-1.6-2b6cb0)](https://github.com/julientournois/KarstEntry/releases)
 [![QGIS](https://img.shields.io/badge/QGIS-3.16%20%E2%86%92%204.x-589632?logo=qgis&logoColor=white)](https://qgis.org)
 [![Licence](https://img.shields.io/badge/licence-PolyForm%20Noncommercial%201.0-555)](karst_entry/LICENSE)
 

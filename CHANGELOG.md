@@ -4,6 +4,19 @@ Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
 avec **KarstPro** (`karst_schema.json`, v1.3.0).
 
+## [1.6] — 2026-07-08
+
+### Ajouté
+- **Dépôt QGIS custom** (mises à jour automatiques, sans passer par le dépôt
+  officiel — licence PolyForm Noncommercial incompatible GPL) :
+  `generate_plugins_xml.py` produit le manifeste `plugins.xml`, hébergé sur
+  GitHub Pages du dépôt de distribution.
+- **`add_qgis_repo.bat`/`.sh`/`.py`** : enregistre automatiquement ce dépôt
+  dans QGIS (tous profils détectés, QGIS 3 et 4, Windows/Linux/macOS) — plus
+  besoin de le faire à la main dans Extensions → Paramètres → Dépôts.
+- `metadata.txt` : `homepage`, `repository`, `tracker` renseignés (étaient
+  vides depuis toujours).
+
 ## [1.5] — 2026-07-03
 
 ### Ajouté
