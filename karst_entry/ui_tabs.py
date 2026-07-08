@@ -314,7 +314,7 @@ class TabBuildersMixin:
             title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
-        version = QLabel("Version 1.6  —  Plugin QGIS de saisie de phénomènes karstiques")
+        version = QLabel("Version 1.7  —  Plugin QGIS de saisie de phénomènes karstiques")
         version.setStyleSheet("color: white;")
         layout.addWidget(version)
 
