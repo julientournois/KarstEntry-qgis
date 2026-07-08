@@ -5,7 +5,7 @@
 """
 karst_entry.py
 ==============
-Point d'entrée du plugin QGIS Karst Entry.
+Point d'entrée du plugin QGIS KarstEntry.
 
 KarstEntryPlugin est instancié par classFactory() dans __init__.py.
 Il ajoute une action dans la barre d'outils et le menu QGIS, et
@@ -42,10 +42,10 @@ class KarstEntryPlugin:
         self._action.triggered.connect(self._open_dialog)
 
         self.iface.addToolBarIcon(self._action)
-        self.iface.addPluginToMenu("&Karst Entry", self._action)
+        self.iface.addPluginToMenu("&KarstEntry", self._action)
 
     def unload(self):
-        self.iface.removePluginMenu("&Karst Entry", self._action)
+        self.iface.removePluginMenu("&KarstEntry", self._action)
         self.iface.removeToolBarIcon(self._action)
         if self._dialog:
             self._dialog.close()

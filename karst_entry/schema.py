@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Julien Tournois — PolyForm Noncommercial 1.0
-"""Schéma des couches Karst Entry : chargement de karst_schema.json, replis et
+"""Schéma des couches KarstEntry : chargement de karst_schema.json, replis et
 construction de listes de QgsField.
 
 Contrat partagé avec **KarstPro** (copie locale par projet, cf. karst_schema.json) :
@@ -74,7 +74,7 @@ def _schema_fields(layer_key, fallback):
 def _qgs_fields(fields_def, extra=()):
     """Construit une liste de QgsField depuis un dict {nom: type_json}.
 
-    `extra` : champs supplémentaires (nom, QVariant) propres à Karst Entry,
+    `extra` : champs supplémentaires (nom, QVariant) propres à KarstEntry,
     ajoutés s'ils ne sont pas déjà dans le schéma (ex. x/y, miroir géométrie).
     """
     defs = [QgsField(name, _QVARIANT_BY_TYPE.get(t, QVariant.String))

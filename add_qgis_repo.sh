@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Enregistre le dépôt custom Karst Entry dans QGIS (mises à jour automatiques).
+# Enregistre le dépôt custom KarstEntry dans QGIS (mises à jour automatiques).
 # Fermer QGIS avant de lancer ce script (sinon il écrase la modification à sa fermeture).
 set -euo pipefail
 

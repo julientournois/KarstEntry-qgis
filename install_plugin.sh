@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installation du plugin Karst Entry sous Linux.
+# Installation du plugin KarstEntry sous Linux.
 # Copie le plugin dans les profils QGIS 3 et/ou QGIS 4 détectés.
 #
 # Usage :

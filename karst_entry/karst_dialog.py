@@ -5,7 +5,7 @@
 """
 karst_dialog.py
 ===============
-Dialogue principal du plugin Karst Entry.
+Dialogue principal du plugin KarstEntry.
 
 Contient :
   - KarstDialog   : fenêtre Qt multi-onglets (QDialog)
@@ -91,7 +91,7 @@ def _build_reference(feature_id, x, y):
 
 
 class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
-    """Fenêtre principale du plugin Karst Entry.
+    """Fenêtre principale du plugin KarstEntry.
 
     Architecture de la saisie
     -------------------------
@@ -545,7 +545,7 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
         Best effort : silencieux si la couche n'est pas sur disque.
         """
         try:
-            layer.saveStyleToDatabase(layer.name(), "Style Karst Entry", True, "")
+            layer.saveStyleToDatabase(layer.name(), "Style KarstEntry", True, "")
         except Exception:
             pass
 
@@ -803,7 +803,7 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
         bouton Annuler fonctionne. Ne s'affiche qu'au-delà de ~0,4 s.
         """
         dlg = QProgressDialog(label, "Annuler", 0, max(int(total), 1), self)
-        dlg.setWindowTitle("Karst Entry")
+        dlg.setWindowTitle("KarstEntry")
         # Modal : Qt n'appelle QApplication.processEvents() depuis setValue() que
         # si le dialog est modal. Sans ça → fenêtre blanche figée pendant l'export.
         dlg.setWindowModality(_WindowModal)
@@ -2185,9 +2185,9 @@ class KarstDialog(TabBuildersMixin, LayersMixin, QDialog):
             self._imp_to_existing_layer(rows, ref_col, csv_dir)
 
     def _imp_tracages_to_new_layer(self, rows, csv_dir=""):
-        """Crée une couche de traçages (lignes) depuis un CSV exporté par Karst
-        Entry : géométrie reconstruite depuis la colonne WKT, attributs mappés
-        par nom. Enregistre toujours un GeoPackage réel."""
+        """Crée une couche de traçages (lignes) depuis un CSV exporté par
+        KarstEntry : géométrie reconstruite depuis la colonne WKT, attributs
+        mappés par nom. Enregistre toujours un GeoPackage réel."""
         src_crs_id = getattr(self, "_imp_crs_id", None) \
             or self.canvas.mapSettings().destinationCrs().authid()
         layer_name = (self._imp_name_edit.text().strip()

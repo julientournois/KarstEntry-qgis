@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Julien Tournois — PolyForm Noncommercial 1.0
-"""Gestion des couches GeoPackage de Karst Entry — mixin séparé pour alléger
+"""Gestion des couches GeoPackage de KarstEntry — mixin séparé pour alléger
 karst_dialog.py : résolution/création/persistance des couches cavités et
 traçages, validation/migration de schéma, symbologie et distance métrique.
 
@@ -32,7 +32,7 @@ class LayersMixin:
     def _cavites_field_defs():
         """Champs de la couche cavités, chargés depuis karst_schema.json.
 
-        x/y (miroir de la géométrie) sont propres à Karst Entry, ajoutés
+        x/y (miroir de la géométrie) sont propres à KarstEntry, ajoutés
         en plus des champs du contrat partagé.
         """
         return _qgs_fields(

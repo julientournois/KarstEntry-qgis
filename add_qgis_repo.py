@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Julien Tournois — PolyForm Noncommercial 1.0
-"""Enregistre le dépôt custom Karst Entry dans QGIS (mises à jour automatiques).
+"""Enregistre le dépôt custom KarstEntry dans QGIS (mises à jour automatiques).
 
 Ajoute une entrée dans les paramètres QGIS ("Extensions -> Gérer et installer
 les extensions -> Paramètres -> Dépôts") pour chaque profil QGIS 3 et/ou 4
@@ -21,8 +21,14 @@ import argparse
 import os
 import sys
 
-REPO_NAME = "Karst Entry"
+REPO_NAME = "KarstEntry"
 REPO_URL = "https://julientournois.github.io/KarstEntry-qgis/plugins.xml"
+
+# Ancien nom du dépôt (avant le renommage "Karst Entry" -> "KarstEntry",
+# 2026-07-08) : à nettoyer si présent, sinon un utilisateur qui relance ce
+# script se retrouve avec DEUX entrées de dépôt (l'ancienne, orpheline, en
+# plus de la nouvelle).
+_OLD_REPO_NAME = "Karst Entry"
 
 
 def _qsettings_class():
@@ -77,11 +83,20 @@ def add_repo(ini_path, dry_run=False):
     """
     QSettings = _qsettings_class()
     group = f"app/plugin_repositories/{REPO_NAME}"
+    old_group = f"app/plugin_repositories/{_OLD_REPO_NAME}"
     if dry_run:
         print(f"  [dry-run] {ini_path} : {group}/url = {REPO_URL}")
+        print(f"  [dry-run] {ini_path} : suppression de {old_group} si présent")
         return
     s = QSettings(ini_path, QSettings.Format.IniFormat
                   if hasattr(QSettings, "Format") else QSettings.IniFormat)
+    # Migration : retire l'ancienne entrée "Karst Entry" si elle existe,
+    # sinon elle reste orpheline à côté de la nouvelle "KarstEntry".
+    s.beginGroup("app/plugin_repositories")
+    had_old = _OLD_REPO_NAME in s.childGroups()
+    s.endGroup()
+    if had_old:
+        s.remove(old_group)
     s.beginGroup(group)
     s.setValue("url", REPO_URL)
     s.setValue("enabled", True)

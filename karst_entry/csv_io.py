@@ -80,7 +80,7 @@ def gpx_document(waypoints):
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<gpx version="1.1" creator="Karst Entry" '
+        '<gpx version="1.1" creator="KarstEntry" '
         'xmlns="http://www.topografix.com/GPX/1/1">',
     ]
     for wp in waypoints:

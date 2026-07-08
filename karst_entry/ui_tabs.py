@@ -310,11 +310,11 @@ class TabBuildersMixin:
         if os.path.isfile(logo_path):
             title.setPixmap(QPixmap(logo_path).scaledToWidth(160, _Smooth))
         else:
-            title.setText("Karst Entry")
+            title.setText("KarstEntry")
             title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
-        version = QLabel("Version 1.7.1  —  Plugin QGIS de saisie de phénomènes karstiques")
+        version = QLabel("Version 1.7.2  —  Plugin QGIS de saisie de phénomènes karstiques")
         version.setStyleSheet("color: white;")
         layout.addWidget(version)
 
