@@ -4,6 +4,16 @@ Toutes les évolutions notables du plugin. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/). Schéma de données partagé
 avec **KarstPro** (`karst_schema.json`, v1.3.0).
 
+## [1.7.3] — 2026-07-22
+
+### Ajouté
+- **Installeur Windows autonome** (`KarstEntry_Setup_v<version>.exe`, Inno Setup) :
+  assistant graphique détectant les profils QGIS (3 et/ou 4, plusieurs profils
+  possibles), copie du plugin, enregistrement optionnel du dépôt de mises à
+  jour automatiques, et vrai désinstalleur (Panneau de configuration →
+  Programmes). Aucune dépendance externe (KarstEntry n'en a aucune). Devient
+  la méthode Windows recommandée, à la place du zip + `install_plugin.bat`.
+
 ## [1.7.2] — 2026-07-08
 
 ### Modifié

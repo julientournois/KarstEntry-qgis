@@ -1,14 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <plugins>
-    <pyqgis_plugin name="KarstEntry" version="1.7.2">
+    <pyqgis_plugin name="KarstEntry" version="1.7.3">
         <about><![CDATA[Permet la saisie rapide de cavités karstiques via formulaire, sur une couche existante ou une nouvelle couche. Génère une référence unique par entrée.]]></about>
         <author_name><![CDATA[Julien Tournois]]></author_name>
-        <changelog><![CDATA[Modifié :
-- Nom du plugin renommé « Karst Entry » → « KarstEntry » (un mot, aligné sur le nom des dépôts GitHub).]]></changelog>
-        <create_date>2026-07-08T20:10:43.908472+00:00</create_date>
+        <changelog><![CDATA[Ajouté :
+- Installeur Windows autonome (`KarstEntry_Setup_v<version>.exe`, Inno Setup) :
+  assistant graphique détectant les profils QGIS (3 et/ou 4, plusieurs profils
+  possibles), copie du plugin, enregistrement optionnel du dépôt de mises à
+  jour automatiques, et vrai désinstalleur (Panneau de configuration →
+  Programmes). Aucune dépendance externe (KarstEntry n'en a aucune). Devient
+  la méthode Windows recommandée, à la place du zip + `install_plugin.bat`.]]></changelog>
+        <create_date>2026-07-22T19:41:30.242434+00:00</create_date>
         <deprecated>False</deprecated>
         <description><![CDATA[Plugin de saisie de données pour les phénomènes karstiques de surface]]></description>
-        <download_url>https://github.com/julientournois/KarstEntry-qgis/releases/download/v1.7.2/karst_entry.zip</download_url>
+        <download_url>https://github.com/julientournois/KarstEntry-qgis/releases/download/v1.7.3/karst_entry.zip</download_url>
         <experimental>False</experimental>
         <file_name>karst_entry.zip</file_name>
         <homepage><![CDATA[https://github.com/julientournois/KarstEntry-qgis]]></homepage>
@@ -19,8 +24,8 @@
         <server>False</server>
         <tags><![CDATA[karst,speleology,cave,geology,field data]]></tags>
         <tracker><![CDATA[https://github.com/julientournois/KarstEntry/issues]]></tracker>
-        <update_date>2026-07-08T20:10:43.908472+00:00</update_date>
+        <update_date>2026-07-22T19:41:30.242434+00:00</update_date>
         <uploaded_by><![CDATA[Julien Tournois]]></uploaded_by>
-        <version>1.7.2</version>
+        <version>1.7.3</version>
     </pyqgis_plugin>
 </plugins>
